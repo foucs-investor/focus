@@ -37,7 +37,7 @@ def render():
     }
 
     # ============================================================
-    # 2. Download (캐싱 적용으로 로딩 속도 개선)
+    # 2. Download (캐싱 적용)
     # ============================================================
     @st.cache_data(ttl=3600)
     def load_data():
@@ -268,7 +268,7 @@ def render():
     st.pyplot(fig)
 
     # ============================================================
-    # 15. Recent 30 Trading Days
+    # 15. Recent 30 Trading Days (최신순 내림차순 정렬)
     # ============================================================
     st.markdown("### 📋 최근 30 거래일 상세 데이터")
     recent_columns = [
@@ -276,7 +276,10 @@ def render():
         "Breadth_Score_MA5", "Breadth_Diff", "Slope_5D", "Slope_10D",
         "Breadth_From_20D_High", "Bearish_Divergence", "Strong_Bearish_Divergence", "Risk_Level"
     ]
-    recent_table = breadth[recent_columns].tail(30)
+    
+    # tail(30)을 가져온 뒤 sort_index(ascending=False)를 적용하여 최신 날짜가 맨 위에 오도록 정렬
+    recent_table = breadth[recent_columns].tail(30).sort_index(ascending=False)
+
     st.dataframe(recent_table.style.format({
         "Above_MA20": "{:.1f}", "Above_MA60": "{:.1f}", "Above_MA200": "{:.1f}",
         "Positive_60D": "{:.1f}", "Breadth_Score_MA5": "{:.1f}", "Breadth_Diff": "{:+.1f}",
