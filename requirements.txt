@@ -10,3 +10,4 @@ html5lib
 lxml
 beautifulsoup4
 OpenDartReader
+pykrx
