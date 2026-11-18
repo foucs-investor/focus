@@ -1,9 +1,6 @@
 # ============================================================
 # AI Tech Breadth & Peak-out Dashboard
 # ============================================================
-
-!pip install yfinance -q
-
 import yfinance as yf
 import pandas as pd
 import numpy as np
