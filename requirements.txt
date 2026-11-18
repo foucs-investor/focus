@@ -1,0 +1,12 @@
+matplotlib
+seaborn
+plotly
+pandas
+yfinance
+streamlit
+openpyxl
+finance-datareader
+html5lib
+lxml
+beautifulsoup4
+OpenDartReader
