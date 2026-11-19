@@ -1,5 +1,6 @@
 # modules/00_today_market.py
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -15,55 +16,99 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     """티커, 전체 종목명, 세부 테마명을 기반으로 상위 대분류 테마로 묶어주는 함수"""
     lower_name = (full_name or "").lower()
     lower_theme = (theme_name or "").lower()
-        
+
     # 시장 지표 자체는 별도의 대분류 명칭 부여
     if ticker in ["^KS11", "^KQ11"]:
         return "시장 지표 (KOSPI/KOSDAQ)"
-        
+
     # 화장품/음식료 및 K뷰티 통합 그룹화
-    if any(keyword in lower_name or keyword in lower_theme for keyword in ["화장품", "k뷰티", "k-뷰티", "뷰티", "푸드"]):
+    if any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["화장품", "k뷰티", "k-뷰티", "뷰티", "푸드"]
+    ):
         return "화장품/음식료"
-        
+
     # 1. 엔터/컨텐츠/인터넷 그룹 (ACE KPOP포커스 포함)
-    elif ticker == "475050.KS" or any(keyword in lower_name or keyword in lower_theme for keyword in ["k-pop", "kpop", "포커스", "엔터", "미디어", "게임", "컨텐츠", "웹툰", "플랫폼", "인터넷", "포털"]):
+    elif ticker == "475050.KS" or any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in [
+            "k-pop",
+            "kpop",
+            "포커스",
+            "엔터",
+            "미디어",
+            "게임",
+            "컨텐츠",
+            "웹툰",
+            "플랫폼",
+            "인터넷",
+            "포털",
+        ]
+    ):
         return "엔터/컨텐츠/인터넷"
-       
+
     # 3. 반도체 그룹
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["반도체", "소부장", "후공정", "장비", "메모리"]):
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["반도체", "소부장", "후공정", "장비", "메모리"]
+    ):
         return "반도체"
-        
+
     # 4. 금융 그룹
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["증권", "은행", "금융", "보험", "지주사"]):
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["증권", "은행", "금융", "보험", "지주사"]
+    ):
         return "금융"
-        
+
     # 5. 바이오/헬스케어 그룹
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["바이오", "헬스케어", "제약", "의료기기", "의료"]):
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["바이오", "헬스케어", "제약", "의료기기", "의료"]
+    ):
         return "바이오/헬스케어"
-        
+
     # 6. AI/인공지능/소프트웨어 그룹
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["인공지능", "소프트웨어", "클라우드", "software", "보안", "it"]):
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["인공지능", "소프트웨어", "클라우드", "software", "보안", "it"]
+    ):
         return "IT·소프트웨어"
-        
+
     # 7. 조선/방산/우주 그룹
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["조선", "방산", "우주", "항공"]):
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["조선", "방산", "우주", "항공"]
+    ):
         return "조선/방산"
-        
+
     # 8. 친환경에너지
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["친환경"]):
-        return "친환경에너지"      
-          
+    elif any(
+        keyword in lower_name or keyword in lower_theme for keyword in ["친환경"]
+    ):
+        return "친환경에너지"
+
     # 9. 소비재
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["생활소비","경기소비"]):
-        return "소비재"       
-        
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["생활소비", "경기소비"]
+    ):
+        return "소비재"
+
     # 10. AIDC
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["건설","설비","원자력"]):
-        return "AIDC"      
-        
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["건설", "설비", "원자력"]
+    ):
+        return "AIDC"
+
     # 11. 로봇/자동차/2차전지
-    elif any(keyword in lower_name or keyword in lower_theme for keyword in ["로봇", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]):
-        return "로봇/자동차/2차전지"                    
-    
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["로봇", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]
+    ):
+        return "로봇/자동차/2차전지"
+
     return theme_name
 
 
@@ -113,8 +158,8 @@ def render():
         else pd.Series(dtype=float)
     )
 
-    # [수정] 실행 시점의 당일 날짜 및 시간 동적 반영
-    now = datetime.now()
+    # [수정] 한국 표준시(Asia/Seoul) 기준으로 당일 날짜 및 시각 반영
+    now = datetime.now(ZoneInfo("Asia/Seoul"))
     base_date_str = now.strftime("%Y-%m-%d")
     current_time_str = now.strftime("%H:%M")
     full_timestamp = f"{base_date_str} {current_time_str}"
@@ -161,7 +206,7 @@ def render():
             continue
         full_name = name_mapping.get(ticker, ticker)
         raw_theme = clean_theme_name(full_name)
-        
+
         theme_name = group_theme_category(ticker, full_name, raw_theme)
 
         # 기준 지수 대비 차이(초과 수익/부진) 계산
@@ -171,7 +216,10 @@ def render():
             diff_html = f"<span style='font-size:11px;'>지수대비 {diff:+.2f}%</span>"
         else:
             display_str = f"▼ {diff:.2f}% ({ret:+.2f}%)"
-            diff_html = f"<span style='font-size:11px; color:#000000; font-weight:bold;'>✔ 지수대비 {diff:+.2f}%</span>"
+            diff_html = (
+                f"<span style='font-size:11px; color:#000000; font-weight:bold;'>"
+                f"✔ 지수대비 {diff:+.2f}%</span>"
+            )
 
         status = "상승" if ret >= 0 else "하락"
 
