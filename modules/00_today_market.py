@@ -113,8 +113,10 @@ def render():
         else pd.Series(dtype=float)
     )
 
-    base_date_str = "2026-11-16"
-    current_time_str = datetime.now().strftime("%H:%M")
+    # [수정] 실행 시점의 당일 날짜 및 시간 동적 반영
+    now = datetime.now()
+    base_date_str = now.strftime("%Y-%m-%d")
+    current_time_str = now.strftime("%H:%M")
     full_timestamp = f"{base_date_str} {current_time_str}"
 
     kospi_ret = idx_returns.get("^KS11", 0)
@@ -169,7 +171,6 @@ def render():
             diff_html = f"<span style='font-size:11px;'>지수대비 {diff:+.2f}%</span>"
         else:
             display_str = f"▼ {diff:.2f}% ({ret:+.2f}%)"
-            # 지수 대비 마이너스인 경우 검은색(#000000)으로 표기하고 체크 기호(✔) 추가[cite: 1]
             diff_html = f"<span style='font-size:11px; color:#000000; font-weight:bold;'>✔ 지수대비 {diff:+.2f}%</span>"
 
         status = "상승" if ret >= 0 else "하락"
