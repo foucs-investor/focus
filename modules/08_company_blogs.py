@@ -167,7 +167,7 @@ def render():
                     _save_blogs(updated)
                     st.rerun()
 
-    # 4. 표 형태로 한눈에 보기 (선택 사항)
+    # 4. 표 형태로 한눈에 보기 (블로그 URL 클릭 시 새 탭 이동)
     with st.expander("📋 표로 한눈에 보기", expanded=False):
         df_view = pd.DataFrame(filtered_blogs)[
             ["company", "title", "url", "memo", "created_at"]
@@ -180,4 +180,14 @@ def render():
                 "created_at": "등록일시",
             }
         )
-        st.dataframe(df_view, use_container_width=True, hide_index=True)
+        st.dataframe(
+            df_view,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "블로그 URL": st.column_config.LinkColumn(
+                    "블로그 URL",
+                    display_text="🔗 링크 열기",
+                )
+            },
+        )
