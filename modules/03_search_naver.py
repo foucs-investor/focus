@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import html
 import io
 import json
 import re
@@ -48,6 +49,14 @@ def search_naver_blog(query, client_id, client_secret, display=100, start=1):
         return []
     except Exception:
         return []
+
+
+def _clean_html_text(text: str) -> str:
+    """HTML 태그를 제거하고 HTML 엔티티(&amp;, &quot; 등)를 원래 문자로 변환합니다."""
+    if not text:
+        return ""
+    no_tags = re.sub(r"<.*?>", "", str(text))
+    return html.unescape(no_tags).strip()
 
 
 # ==============================================================================
@@ -221,7 +230,6 @@ def build_price_and_blog_chart(
     start_date: datetime,
     end_date: datetime,
 ) -> go.Figure:
-    # 1. 검색 기간 전체 날짜 캘린더 생성
     all_dates = pd.date_range(
         start=start_date.strftime("%Y-%m-%d"),
         end=end_date.strftime("%Y-%m-%d"),
@@ -229,7 +237,6 @@ def build_price_and_blog_chart(
     )
     base_df = pd.DataFrame({"Date": all_dates.strftime("%Y-%m-%d")})
 
-    # 2. 일별 블로그 건수 집계
     blog_counts = (
         result_df.groupby("날짜")
         .size()
@@ -239,18 +246,15 @@ def build_price_and_blog_chart(
     merged = pd.merge(base_df, blog_counts, on="Date", how="left")
     merged["블로그건수"] = merged["블로그건수"].fillna(0).astype(int)
 
-    # 3. 주가 데이터 병합 (휴장일은 직전/인접 거래일 종가로 보간)
     has_stock = not df_stock.empty
     if has_stock:
         merged = pd.merge(merged, df_stock, on="Date", how="left")
         merged["Close"] = merged["Close"].ffill().bfill()
 
-    # 4. 날짜를 숫자 문자열(YYYYMMDD)로 변환하여 X축에 표기
     merged["DateNum"] = merged["Date"].str.replace("-", "", regex=False)
 
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 기본축(좌측): 기업 주가 (선 차트)
     if has_stock:
         label_name = (
             f"{keyword} 주가 ({ticker})" if ticker else f"{keyword} 주가"
@@ -267,7 +271,6 @@ def build_price_and_blog_chart(
             secondary_y=False,
         )
 
-    # 보조축(우측): 일별 블로그 글 건수 (선 차트)
     fig.add_trace(
         go.Scatter(
             x=merged["DateNum"],
@@ -304,7 +307,6 @@ def build_price_and_blog_chart(
         ),
     )
 
-    # X축 날짜 숫자 표기 설정
     fig.update_xaxes(
         type="category",
         title_text="날짜 (YYYYMMDD)",
@@ -312,7 +314,6 @@ def build_price_and_blog_chart(
         nticks=8,
     )
 
-    # 기본축(좌측 Y축) 설정
     fig.update_yaxes(
         title_text="주가 (원)" if has_stock else "주가 (데이터 없음)",
         tickformat=",",
@@ -320,7 +321,6 @@ def build_price_and_blog_chart(
         secondary_y=False,
     )
 
-    # 보조축(우측 Y축) 설정
     max_cnt = max(int(merged["블로그건수"].max()), 1)
     fig.update_yaxes(
         title_text="블로그 글 건수 (건)",
@@ -339,11 +339,10 @@ def build_price_and_blog_chart(
 def render():
     st.title("🔍 네이버 블로그 키워드 단독 언급 검색기")
     st.markdown(
-        "네이버 블로그에서 특정 키워드/기업명이 **제목에 단독으로 언급된 글**을 최근 작성일 순으로 검색하고, "
+        "네이버 블로그에서 검색된 글 목록을 최근 작성일 순으로 확인하고, "
         "**주가 추이와 블로그 언급량**을 함께 비교합니다."
     )
 
-    # API 키 및 기본 설정
     with st.expander("🔑 네이버 API 키 설정", expanded=False):
         col_api1, col_api2 = st.columns(2)
         with col_api1:
@@ -355,7 +354,6 @@ def render():
                 "Client Secret", value=DEFAULT_CLIENT_SECRET, type="password"
             )
 
-    # 검색 입력 및 옵션 설정
     st.subheader("📌 검색 옵션")
 
     sample_keywords = [
@@ -404,7 +402,6 @@ def render():
             format_func=lambda x: f"최대 {x}건",
         )
 
-    # 제외할 단어 입력 및 주가 티커 수동 지정 옵션
     col_opt1, col_opt2 = st.columns([2.5, 1.5])
     with col_opt1:
         exclude_words_input = st.text_input(
@@ -418,7 +415,7 @@ def render():
             help="기업명 자동 검색이 안 될 때 6자리 종목코드나 .KS/.KQ 티커를 직접 입력하세요.",
         )
 
-    col_chk1, col_chk2 = st.columns([1.2, 2.8])
+    col_chk1, col_chk2 = st.columns([1.4, 2.6])
     with col_chk1:
         exclude_in_desc = st.checkbox(
             "본문 요약에도 제외 단어 적용",
@@ -426,9 +423,11 @@ def render():
             help="체크 시 제목뿐 아니라 네이버 검색 결과의 본문 요약(description)에 제외 단어가 포함된 글도 제외합니다.",
         )
     with col_chk2:
+        # 검색 결과 누락 방지를 위해 기본값은 False로 설정
         only_single_mention = st.checkbox(
-            "제목에 타 기업/키워드 동시 언급된 글 제외 (단독 언급 필터링)",
-            value=True,
+            "복수 종목 나열 제목 일부 제외 (선택)",
+            value=False,
+            help="체크 시 슬래시(/)나 파이프(|) 등으로 여러 종목이 나열된 일부 제목을 제외합니다.",
         )
 
     if st.button("🚀 블로그 검색 시작", use_container_width=True, type="primary"):
@@ -446,6 +445,7 @@ def render():
 
         blog_items = []
         max_start = min(max_fetch, 1000)
+        total_pages = max(1, (max_start + 99) // 100)
 
         for idx, start in enumerate(range(1, max_start + 1, 100)):
             status_text.text(
@@ -457,7 +457,7 @@ def render():
             if not items:
                 break
             blog_items.extend(items)
-            progress_bar.progress((idx + 1) / (max_start // 100))
+            progress_bar.progress((idx + 1) / total_pages)
 
         status_text.empty()
         progress_bar.empty()
@@ -467,6 +467,10 @@ def render():
             return
 
         df = pd.DataFrame(blog_items)
+
+        # 중복 링크 제거
+        if "link" in df.columns:
+            df = df.drop_duplicates(subset=["link"], keep="first")
 
         # postdate 파싱
         df["postDate"] = pd.to_datetime(
@@ -478,30 +482,20 @@ def render():
             st.warning("날짜 파싱이 가능한 글이 없습니다.")
             return
 
-        # 기간 필터링 (KST 기준)
+        # 정확한 개월 수 기준 기간 필터링 (KST 기준)
         now_kst = datetime.now(KST).replace(tzinfo=None)
-        cutoff = now_kst - timedelta(days=months_filter * 30)
+        cutoff = pd.Timestamp(now_kst) - pd.DateOffset(months=months_filter)
         df = df[df["postDate"] >= cutoff]
 
         if df.empty:
             st.warning(f"최근 {months_filter}개월 내 작성된 블로그 글이 없습니다.")
             return
 
-        # 제목 및 본문 요약 정제 (HTML 태그 제거)
-        df["clean_title"] = (
-            df["title"].str.replace(r"<.*?>", "", regex=True).str.strip()
+        # 제목 및 본문 요약 정제 (HTML 태그 및 엔티티 디코딩)
+        df["clean_title"] = df["title"].apply(_clean_html_text)
+        df["clean_desc"] = df.get("description", pd.Series("", index=df.index)).apply(
+            _clean_html_text
         )
-        df["clean_desc"] = (
-            df["description"]
-            .fillna("")
-            .str.replace(r"<.*?>", "", regex=True)
-            .str.strip()
-        )
-
-        # 키워드 포함 조건
-        df = df[
-            df["clean_title"].str.contains(re.escape(clean_kw), case=False)
-        ]
 
         # 제외 단어 필터링
         exclude_list = [
@@ -511,43 +505,33 @@ def render():
             exclude_pattern = "|".join(re.escape(w) for w in exclude_list)
             df = df[
                 ~df["clean_title"].str.contains(
-                    exclude_pattern, case=False, na=False
+                    exclude_pattern, case=False, na=False, regex=True
                 )
             ]
             if exclude_in_desc:
                 df = df[
                     ~df["clean_desc"].str.contains(
-                        exclude_pattern, case=False, na=False
+                        exclude_pattern, case=False, na=False, regex=True
                     )
                 ]
 
-        # 단독 언급 필터링
+        # 선택적 복수 나열 패턴 필터링 (과도한 탈락 방지)
         if only_single_mention:
-            multi_pattern = re.compile(
-                r"[,&·\|]\s*[가-힣\w]+(?:주|코퍼레이션|홀딩스|인더스트리)?\s*[,&·\|]"
-            )
-            df = df[~df["clean_title"].str.contains(multi_pattern)]
+            multi_list_pattern = re.compile(r"\s*[|]\s*")
             df = df[
-                ~df["clean_title"].str.contains(
-                    r",.*" + re.escape(clean_kw), case=False
-                )
-            ]
-            df = df[
-                ~df["clean_title"].str.contains(
-                    re.escape(clean_kw) + r".*,", case=False
-                )
+                ~df["clean_title"].str.contains(multi_list_pattern, na=False)
             ]
 
         if df.empty:
             st.warning(
-                "선택하신 필터링 조건(기간, 제외 단어, 단독 언급)을 만족하는 블로그 글이 없습니다."
+                "선택하신 필터링 조건(기간, 제외 단어)을 만족하는 블로그 글이 없습니다."
             )
             return
 
         # 최신순 정렬
         df = df.sort_values("postDate", ascending=False)
 
-        # 결과 정리
+        # 결과 정리 (수집된 검색결과 전체 반영)
         result_df = df[["postDate", "clean_title", "link"]].copy()
         result_df["postDate"] = result_df["postDate"].dt.strftime("%Y-%m-%d")
         result_df.rename(
@@ -562,7 +546,7 @@ def render():
         # 기업 주가 데이터 조회
         with st.spinner(f"'{clean_kw}' 주가 데이터를 조회하는 중입니다..."):
             df_stock, ticker, resolved_name = fetch_stock_history(
-                clean_kw, cutoff, now_kst, manual_ticker=manual_ticker
+                clean_kw, cutoff.to_pydatetime(), now_kst, manual_ticker=manual_ticker
             )
 
         filter_info = (
@@ -572,7 +556,6 @@ def render():
             f"🎉 총 **{len(result_df)}건**의 블로그 글을 수집했습니다!{filter_info}"
         )
 
-        # 엑셀 다운로드 버튼 준비
         excel_bytes = create_excel_with_hyperlinks(result_df)
         today_str = now_kst.strftime("%Y%m%d")
         safe_kw = re.sub(r'[\/\\:*?"<>|]', "_", clean_kw)
@@ -588,11 +571,10 @@ def render():
 
         st.markdown("---")
 
-        # 좌측: 수집 결과 목록 / 우측: 주가(기본축) + 글 건수(보조축) 차트
         left_col, right_col = st.columns([1.05, 1.15], gap="medium")
 
         with left_col:
-            st.subheader("📋 수집 결과 목록")
+            st.subheader(f"📋 수집 결과 목록 ({len(result_df)}건)")
             st.dataframe(
                 result_df,
                 height=560,
@@ -624,7 +606,7 @@ def render():
                 df_stock=df_stock,
                 keyword=clean_kw,
                 ticker=ticker,
-                start_date=cutoff,
+                start_date=cutoff.to_pydatetime(),
                 end_date=now_kst,
             )
             st.plotly_chart(fig, use_container_width=True)
