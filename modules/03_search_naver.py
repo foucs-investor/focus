@@ -51,76 +51,137 @@ def search_naver_blog(query, client_id, client_secret, display=100, start=1):
 
 
 # ==============================================================================
-# 3. 기업명 기반 주가 데이터 조회 함수 (Yahoo Finance 자동 티커 검색)
+# 3. 기업명 기반 주가 데이터 조회 함수 (네이버 종목코드 검색 + yfinance)
 # ==============================================================================
-def resolve_korean_ticker(company_name: str) -> tuple[str | None, str | None]:
-    """기업명으로 야후 파이낸스 검색 API를 조회하여 한국 증시(.KS / .KQ) 티커를 반환합니다."""
-    query = company_name.strip()
-    if not query:
-        return None, None
-
-    # 이미 6자리 숫자 티커 형태로 입력한 경우
-    if re.fullmatch(r"\d{6}", query):
-        for suffix in (".KS", ".KQ"):
-            try:
-                hist = yf.Ticker(query + suffix).history(period="5d")
-                if not hist.empty:
-                    return query + suffix, query
-            except Exception:
-                continue
-
-    try:
-        encoded = urllib.parse.quote(query)
-        search_url = (
-            f"https://query2.finance.yahoo.com/v1/finance/search"
-            f"?q={encoded}&quotesCount=10&newsCount=0"
-        )
-        req = urllib.request.Request(
-            search_url,
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            quotes = data.get("quotes", [])
-
-            # .KS(코스피) 또는 .KQ(코스닥) 종목 우선 탐색
-            for q in quotes:
-                symbol = q.get("symbol", "")
-                if symbol.endswith((".KS", ".KQ")):
-                    resolved_name = (
-                        q.get("shortname") or q.get("longname") or query
-                    )
-                    return symbol, resolved_name
-    except Exception:
-        pass
-
-    return None, None
-
-
-def fetch_stock_history(
-    company_name: str, start_date: datetime, end_date: datetime
-) -> tuple[pd.DataFrame, str | None, str | None]:
-    """검색 기간에 해당하는 기업의 일별 주가(종가)를 가져옵니다."""
-    ticker, resolved_name = resolve_korean_ticker(company_name)
-    if not ticker:
-        return pd.DataFrame(), None, None
-
+def _try_yfinance_history(
+    ticker: str, start_date: datetime, end_date: datetime
+) -> pd.DataFrame:
+    """주어진 티커로 yfinance 일별 종가 데이터를 조회합니다."""
     try:
         hist = yf.Ticker(ticker).history(
             start=start_date.strftime("%Y-%m-%d"),
             end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+            auto_adjust=True,
         )
-        if hist.empty:
-            return pd.DataFrame(), ticker, resolved_name
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            return pd.DataFrame()
 
-        df_stock = hist[["Close"]].reset_index()
-        df_stock["Date"] = pd.to_datetime(df_stock["Date"]).dt.strftime(
+        df_stock = hist[["Close"]].dropna().reset_index()
+        date_col = df_stock.columns[0]
+        df_stock["Date"] = pd.to_datetime(df_stock[date_col]).dt.strftime(
             "%Y-%m-%d"
         )
         df_stock = df_stock.groupby("Date", as_index=False)["Close"].last()
-        return df_stock, ticker, resolved_name
+        return df_stock[["Date", "Close"]]
     except Exception:
-        return pd.DataFrame(), ticker, resolved_name
+        return pd.DataFrame()
+
+
+def resolve_korean_ticker(
+    company_name: str, manual_ticker: str = ""
+) -> tuple[list[str], str]:
+    """기업명 또는 수동 입력 티커로부터 시도할 야후 파이낸스 티커 후보 목록과 종목명을 반환합니다."""
+    manual = manual_ticker.strip().upper()
+    if manual:
+        if manual.endswith((".KS", ".KQ")):
+            return [manual], manual
+        if re.fullmatch(r"\d{6}", manual):
+            return [f"{manual}.KS", f"{manual}.KQ"], manual
+        return [manual], manual
+
+    query = company_name.strip()
+    if not query:
+        return [], ""
+
+    # 1) 6자리 종목코드를 직접 입력한 경우
+    if re.fullmatch(r"\d{6}", query):
+        return [f"{query}.KS", f"{query}.KQ"], query
+
+    # 2) 이미 .KS 또는 .KQ 접미사가 붙은 경우
+    upper_q = query.upper()
+    if upper_q.endswith((".KS", ".KQ")):
+        return [upper_q], upper_q
+
+    # 3) 네이버 증권 자동완성 API로 종목코드 및 시장구분(KOSPI/KOSDAQ) 조회
+    candidates: list[str] = []
+    resolved_name = query
+    try:
+        ac_url = (
+            "https://ac.stock.naver.com/ac"
+            f"?q={urllib.parse.quote(query)}&target=stock"
+        )
+        req = urllib.request.Request(
+            ac_url,
+            headers={
+                "User-Agent": "Mozilla/5.0",
+                "Referer": "https://finance.naver.com/",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            items = payload.get("items", [])
+            for item in items:
+                code = str(item.get("code", "")).strip()
+                market = str(item.get("market", "")).upper()
+                name = str(item.get("name", "")).strip()
+                if re.fullmatch(r"\d{6}", code):
+                    if name and resolved_name == query:
+                        resolved_name = name
+                    suffix = ".KQ" if "KOSDAQ" in market else ".KS"
+                    alt_suffix = ".KS" if suffix == ".KQ" else ".KQ"
+                    for t in (f"{code}{suffix}", f"{code}{alt_suffix}"):
+                        if t not in candidates:
+                            candidates.append(t)
+                    if candidates:
+                        break
+    except Exception:
+        pass
+
+    # 4) Yahoo Finance 검색 백업
+    if not candidates:
+        try:
+            yf_url = (
+                "https://query2.finance.yahoo.com/v1/finance/search"
+                f"?q={urllib.parse.quote(query)}&quotesCount=5&newsCount=0"
+            )
+            req = urllib.request.Request(
+                yf_url, headers={"User-Agent": "Mozilla/5.0"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for q_item in data.get("quotes", []):
+                    sym = str(q_item.get("symbol", "")).strip()
+                    if sym.endswith((".KS", ".KQ")) and sym not in candidates:
+                        candidates.append(sym)
+                        resolved_name = (
+                            q_item.get("shortname")
+                            or q_item.get("longname")
+                            or query
+                        )
+                        break
+        except Exception:
+            pass
+
+    return candidates, resolved_name
+
+
+def fetch_stock_history(
+    company_name: str,
+    start_date: datetime,
+    end_date: datetime,
+    manual_ticker: str = "",
+) -> tuple[pd.DataFrame, str | None, str]:
+    """검색 기간에 해당하는 기업의 일별 주가(종가)를 가져옵니다."""
+    candidates, resolved_name = resolve_korean_ticker(
+        company_name, manual_ticker=manual_ticker
+    )
+    for ticker in candidates:
+        df_stock = _try_yfinance_history(ticker, start_date, end_date)
+        if not df_stock.empty:
+            return df_stock, ticker, resolved_name
+
+    fallback_ticker = candidates[0] if candidates else None
+    return pd.DataFrame(), fallback_ticker, resolved_name
 
 
 # ==============================================================================
@@ -182,7 +243,7 @@ def build_price_and_blog_chart(
     merged = pd.merge(base_df, blog_counts, on="Date", how="left")
     merged["블로그건수"] = merged["블로그건수"].fillna(0).astype(int)
 
-    # 3. 주가 데이터 병합 (휴장일은 직전 거래일 종가로 보간하여 선이 끊기지 않게 처리)
+    # 3. 주가 데이터 병합 (휴장일은 직전/인접 거래일 종가로 보간)
     has_stock = not df_stock.empty
     if has_stock:
         merged = pd.merge(merged, df_stock, on="Date", how="left")
@@ -335,7 +396,7 @@ def render():
             format_func=lambda x: f"최대 {x}건",
         )
 
-    # 제외할 단어 입력 및 필터 옵션
+    # 제외할 단어 입력 및 주가 티커 수동 지정 옵션
     col_opt1, col_opt2 = st.columns([2.5, 1.5])
     with col_opt1:
         exclude_words_input = st.text_input(
@@ -343,17 +404,24 @@ def render():
             placeholder="예: 채용, 후기, 이벤트, 할인, 부고",
         )
     with col_opt2:
-        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        manual_ticker = st.text_input(
+            "📈 종목코드 직접 지정 (선택)",
+            placeholder="예: 259960 또는 259960.KS",
+            help="기업명 자동 검색이 안 될 때 6자리 종목코드나 .KS/.KQ 티커를 직접 입력하세요.",
+        )
+
+    col_chk1, col_chk2 = st.columns([1.2, 2.8])
+    with col_chk1:
         exclude_in_desc = st.checkbox(
             "본문 요약에도 제외 단어 적용",
             value=False,
             help="체크 시 제목뿐 아니라 네이버 검색 결과의 본문 요약(description)에 제외 단어가 포함된 글도 제외합니다.",
         )
-
-    only_single_mention = st.checkbox(
-        "제목에 타 기업/키워드 동시 언급된 글 제외 (단독 언급 필터링)",
-        value=True,
-    )
+    with col_chk2:
+        only_single_mention = st.checkbox(
+            "제목에 타 기업/키워드 동시 언급된 글 제외 (단독 언급 필터링)",
+            value=True,
+        )
 
     if st.button("🚀 블로그 검색 시작", use_container_width=True, type="primary"):
         clean_kw = keyword.strip()
@@ -486,7 +554,7 @@ def render():
         # 기업 주가 데이터 조회
         with st.spinner(f"'{clean_kw}' 주가 데이터를 조회하는 중입니다..."):
             df_stock, ticker, resolved_name = fetch_stock_history(
-                clean_kw, cutoff, now_kst
+                clean_kw, cutoff, now_kst, manual_ticker=manual_ticker
             )
 
         filter_info = (
@@ -534,8 +602,9 @@ def render():
         with right_col:
             st.subheader("📊 주가 및 블로그 언급 추이")
             if df_stock.empty:
-                st.caption(
-                    f"'{clean_kw}'에 해당하는 국내 상장 종목 주가를 찾지 못해 블로그 건수만 표시합니다."
+                st.warning(
+                    f"'{clean_kw}'의 주가 시세를 가져오지 못해 블로그 건수만 표시합니다. "
+                    "상단 '종목코드 직접 지정'에 6자리 종목코드(예: 259960)를 입력해 다시 검색해 보세요."
                 )
             else:
                 st.caption(
