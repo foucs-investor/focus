@@ -51,6 +51,96 @@ def search_naver_blog(query, client_id, client_secret, display=100, start=1):
         return []
 
 
+def _month_windows(start_dt: datetime, end_dt: datetime) -> list[tuple[str, str]]:
+    """시작일부터 종료일까지 포함된 월('YYYY.MM' 및 'YYYYMM') 목록을 최신순으로 생성합니다."""
+    windows: list[tuple[str, str]] = []
+    cur = datetime(end_dt.year, end_dt.month, 1)
+    start_ym = datetime(start_dt.year, start_dt.month, 1)
+
+    while cur >= start_ym:
+        windows.append((cur.strftime("%Y.%m"), cur.strftime("%Y%m")))
+        if cur.month == 1:
+            cur = datetime(cur.year - 1, 12, 1)
+        else:
+            cur = datetime(cur.year, cur.month - 1, 1)
+
+    return windows
+
+
+def fetch_blog_items_across_months(
+    query: str,
+    client_id: str,
+    client_secret: str,
+    max_fetch: int,
+    start_dt: datetime,
+    end_dt: datetime,
+    status_placeholder,
+    progress_bar,
+) -> list[dict]:
+    """
+    최근 2개월에 글이 몰려 1,000건 한도에 걸리는 현상을 줄이기 위해
+    전체 최신순 수집과 월별 구간 수집을 함께 수행합니다.
+    """
+    collected: list[dict] = []
+    seen_keys: set[str] = set()
+
+    def _add_items(items: list[dict]) -> None:
+        for item in items:
+            link = str(item.get("link", "") or "").strip()
+            title = str(item.get("title", "") or "").strip()
+            pdate = str(item.get("postdate", "") or "").strip()
+            key = link or f"{title}|{pdate}"
+            if key not in seen_keys:
+                seen_keys.add(key)
+                collected.append(item)
+
+    # 1단계: 전체 기준 최신순 수집 (최대 max_fetch건, API 상한 1,000건)
+    first_limit = min(max_fetch, 1000)
+    first_pages = max(1, (first_limit + 99) // 100)
+    for idx, start in enumerate(range(1, first_limit + 1, 100)):
+        page_display = min(100, first_limit - start + 1)
+        status_placeholder.text(
+            f"전체 최신순 데이터 수집 중... ({start}~{start + page_display - 1}건)"
+        )
+        items = search_naver_blog(
+            query, client_id, client_secret, display=page_display, start=start
+        )
+        if not items:
+            break
+        _add_items(items)
+        progress_bar.progress(min(0.35, (idx + 1) / first_pages * 0.35))
+        if len(items) < page_display:
+            break
+
+    # 2단계: 지정된 검색 기간의 각 월별 구간 수집 (과거 월 데이터 누락 보완)
+    months = _month_windows(start_dt, end_dt)
+    total_months = max(1, len(months))
+    per_month_max = min(400, max(100, max_fetch // total_months + 100))
+
+    for m_idx, (ym_dot, _) in enumerate(months):
+        status_placeholder.text(
+            f"월별({ym_dot}) 블로그 데이터 보완 수집 중... ({m_idx + 1}/{total_months}개월)"
+        )
+        month_query = f"{query} {ym_dot}"
+        for start in range(1, per_month_max + 1, 100):
+            page_display = min(100, per_month_max - start + 1)
+            items = search_naver_blog(
+                month_query,
+                client_id,
+                client_secret,
+                display=page_display,
+                start=start,
+            )
+            if not items:
+                break
+            _add_items(items)
+            if len(items) < page_display:
+                break
+        progress_bar.progress(0.35 + min(0.65, (m_idx + 1) / total_months * 0.65))
+
+    return collected
+
+
 def _extract_blog_key(row: pd.Series) -> str:
     """블로그 링크 또는 블로그 홈 링크에서 동일 블로그를 식별할 수 있는 키를 추출합니다."""
     for col in ("bloggerlink", "link"):
@@ -89,7 +179,6 @@ def _title_contains_keyword(title: str, keyword: str) -> bool:
     k_lower = keyword.lower()
     if k_lower in t_lower:
         return True
-    # 공백 차이(예: 'AI 반도체' vs 'AI반도체')도 허용
     t_nospace = re.sub(r"\s+", "", t_lower)
     k_nospace = re.sub(r"\s+", "", k_lower)
     return bool(k_nospace) and (k_nospace in t_nospace)
@@ -489,32 +578,35 @@ def render():
         cutoff_ts = pd.Timestamp(now_kst) - pd.DateOffset(months=months_filter)
         cutoff_dt = cutoff_ts.to_pydatetime()
 
+        start_str = cutoff_ts.strftime("%Y-%m-%d")
+        end_str = now_kst.strftime("%Y-%m-%d")
+
+        # 검색 시작 시 조회 기간(시작일 ~ 종료일) 화면 표기
+        st.info(
+            f"📅 **조회 기간:** `{start_str}` ~ `{end_str}` (최근 {months_filter}개월, KST 기준)"
+        )
+
         status_text = st.empty()
         progress_bar = st.progress(0)
 
-        blog_items = []
-        total_pages = max(1, (max_fetch + 99) // 100)
-
-        for idx, start in enumerate(range(1, max_fetch + 1, 100)):
-            page_display = min(100, max_fetch - start + 1)
-            status_text.text(
-                f"네이버 블로그 데이터 수집 중... ({start}~{start + page_display - 1}건)"
-            )
-            items = search_naver_blog(
-                clean_kw, client_id, client_secret, display=page_display, start=start
-            )
-            if not items:
-                break
-            blog_items.extend(items)
-            progress_bar.progress((idx + 1) / total_pages)
-            if len(items) < page_display:
-                break
+        blog_items = fetch_blog_items_across_months(
+            query=clean_kw,
+            client_id=client_id,
+            client_secret=client_secret,
+            max_fetch=max_fetch,
+            start_dt=cutoff_dt,
+            end_dt=now_kst,
+            status_placeholder=status_text,
+            progress_bar=progress_bar,
+        )
 
         status_text.empty()
         progress_bar.empty()
 
         if not blog_items:
-            st.warning("검색된 블로그 글이 없습니다.")
+            st.warning(
+                f"조회 기간(`{start_str}` ~ `{end_str}`) 내에 검색된 블로그 글이 없습니다."
+            )
             return
 
         df = pd.DataFrame(blog_items)
@@ -533,11 +625,14 @@ def render():
             st.warning("날짜 파싱이 가능한 글이 없습니다.")
             return
 
-        # 정확한 개월 수 기준 기간 필터링 (KST 기준)
-        df = df[df["postDate"] >= cutoff_ts]
+        # 지정된 검색 기간(시작일 ~ 종료일) 필터링
+        end_cutoff_ts = pd.Timestamp(now_kst.strftime("%Y-%m-%d"))
+        df = df[(df["postDate"] >= cutoff_ts) & (df["postDate"] <= end_cutoff_ts)]
 
         if df.empty:
-            st.warning(f"최근 {months_filter}개월 내 작성된 블로그 글이 없습니다.")
+            st.warning(
+                f"조회 기간(`{start_str}` ~ `{end_str}`) 내 작성된 블로그 글이 없습니다."
+            )
             return
 
         # 제목 및 본문 요약 정제 (HTML 태그 및 엔티티 디코딩)
@@ -547,7 +642,9 @@ def render():
         ).apply(_clean_html_text)
 
         # 본문만 매칭된 글 제외: 제목에 검색 키워드가 포함된 글만 대상
-        df = df[df["clean_title"].apply(lambda t: _title_contains_keyword(t, clean_kw))]
+        df = df[
+            df["clean_title"].apply(lambda t: _title_contains_keyword(t, clean_kw))
+        ]
 
         # 제외 단어 필터링
         exclude_list = [
@@ -576,7 +673,7 @@ def render():
 
         if df.empty:
             st.warning(
-                "제목에 검색 키워드가 포함된 글 중 선택하신 조건을 만족하는 결과가 없습니다."
+                f"조회 기간(`{start_str}` ~ `{end_str}`) 내 제목에 검색 키워드가 포함된 조건 일치 결과가 없습니다."
             )
             return
 
@@ -604,7 +701,7 @@ def render():
                 clean_kw, cutoff_dt, now_kst, manual_ticker=manual_ticker
             )
 
-        filter_notes = ["제목 키워드 일치"]
+        filter_notes = [f"기간: {start_str}~{end_str}", "제목 키워드 일치"]
         if exclude_list:
             filter_notes.append(f"제외 단어: {', '.join(exclude_list)}")
         if only_latest_per_blog:
@@ -634,6 +731,7 @@ def render():
 
         with left_col:
             st.subheader(f"📋 수집 결과 목록 ({len(result_df)}건)")
+            st.caption(f"조회 기간: {start_str} ~ {end_str}")
             st.dataframe(
                 result_df,
                 height=560,
@@ -657,7 +755,8 @@ def render():
                 )
             else:
                 st.caption(
-                    f"기준 종목: {resolved_name} ({ticker}) | 기본축(좌): 주가(원) · 보조축(우): 블로그 글 건수(건)"
+                    f"기준 종목: {resolved_name} ({ticker}) | 기간: {start_str} ~ {end_str} | "
+                    "기본축(좌): 주가(원) · 보조축(우): 블로그 글 건수(건)"
                 )
 
             fig = build_price_and_blog_chart(
