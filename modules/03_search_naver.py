@@ -51,6 +51,28 @@ def search_naver_blog(query, client_id, client_secret, display=100, start=1):
         return []
 
 
+def _extract_blog_key(row: pd.Series) -> str:
+    """블로그 링크 또는 블로그 홈 링크에서 동일 블로그를 식별할 수 있는 키를 추출합니다."""
+    for col in ("bloggerlink", "link"):
+        raw = str(row.get(col, "") or "").strip()
+        if not raw:
+            continue
+        parsed = urllib.parse.urlparse(raw)
+        host = parsed.netloc.lower().replace("www.", "")
+        path_parts = [p for p in parsed.path.split("/") if p]
+
+        if "blog.naver.com" in host and path_parts:
+            return f"naver:{path_parts[0].lower()}"
+        if "tistory.com" in host:
+            return f"tistory:{host}"
+        if host and path_parts:
+            return f"{host}/{path_parts[0].lower()}"
+        if host:
+            return host
+
+    return str(row.get("link", ""))
+
+
 def fetch_blog_items_up_to(
     query: str,
     client_id: str,
@@ -112,7 +134,6 @@ def fetch_blog_items_up_to(
             status_placeholder.text(
                 f"기간 확장 수집 중 ({w_label})... ({len(collected)}/{max_fetch}건)"
             )
-            # 기간 단서를 쿼리에 결합해 구간 내 최신 글 탐색
             win_query = f"{query} {w_start.strftime('%Y.%m')}"
             for start in range(1, 1001, 100):
                 items = search_naver_blog(
@@ -496,7 +517,7 @@ def render():
             help="기업명 자동 검색이 안 될 때 6자리 종목코드나 .KS/.KQ 티커를 직접 입력하세요.",
         )
 
-    col_chk1, col_chk2 = st.columns([1.4, 2.6])
+    col_chk1, col_chk2, col_chk3 = st.columns([1.2, 1.4, 1.4])
     with col_chk1:
         exclude_in_desc = st.checkbox(
             "본문 요약에도 제외 단어 적용",
@@ -504,8 +525,14 @@ def render():
             help="체크 시 제목뿐 아니라 네이버 검색 결과의 본문 요약(description)에 제외 단어가 포함된 글도 제외합니다.",
         )
     with col_chk2:
+        only_latest_per_blog = st.checkbox(
+            "동일 블로그 최신글 1건만 표시",
+            value=True,
+            help="기본값으로 활성화되어 있으며, 같은 블로그에서 작성된 글 중 가장 최신 글 1건만 수집 결과 목록에 남깁니다.",
+        )
+    with col_chk3:
         only_single_mention = st.checkbox(
-            "복수 종목 나열 제목 일부 제외 (선택)",
+            "복수 종목 나열 제목 일부 제외",
             value=False,
             help="체크 시 파이프(|) 등으로 여러 종목이 나열된 일부 제목을 제외합니다.",
         )
@@ -605,8 +632,11 @@ def render():
             )
             return
 
-        # 최신순 정렬
+        # 최신순 정렬 후 동일 블로그 최신글 1건만 남김
         df = df.sort_values("postDate", ascending=False)
+        if only_latest_per_blog:
+            df["_blog_key"] = df.apply(_extract_blog_key, axis=1)
+            df = df.drop_duplicates(subset=["_blog_key"], keep="first")
 
         # 결과 정리
         result_df = df[["postDate", "clean_title", "link"]].copy()
@@ -626,9 +656,13 @@ def render():
                 clean_kw, cutoff_dt, now_kst, manual_ticker=manual_ticker
             )
 
-        filter_info = (
-            f" (제외 단어: {', '.join(exclude_list)})" if exclude_list else ""
-        )
+        filter_notes = []
+        if exclude_list:
+            filter_notes.append(f"제외 단어: {', '.join(exclude_list)}")
+        if only_latest_per_blog:
+            filter_notes.append("블로그별 최신 1건")
+        filter_info = f" ({' · '.join(filter_notes)})" if filter_notes else ""
+
         st.success(
             f"🎉 총 **{len(result_df)}건**의 블로그 글을 수집했습니다!{filter_info}"
         )
