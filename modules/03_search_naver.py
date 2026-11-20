@@ -51,6 +51,83 @@ def search_naver_blog(query, client_id, client_secret, display=100, start=1):
         return []
 
 
+def fetch_blog_items_up_to(
+    query: str,
+    client_id: str,
+    client_secret: str,
+    max_fetch: int,
+    start_dt: datetime,
+    end_dt: datetime,
+    status_placeholder,
+    progress_bar,
+) -> list[dict]:
+    """최대 수집 건수까지 네이버 블로그 글을 수집합니다 (1,000건 초과 시 기간 분할 수집 병행)."""
+    collected: list[dict] = []
+    seen_links: set[str] = set()
+
+    def _add_items(raw_items: list[dict]) -> int:
+        added = 0
+        for item in raw_items:
+            link = item.get("link", "")
+            key = link or json.dumps(item, ensure_ascii=False)
+            if key not in seen_links:
+                seen_links.add(key)
+                collected.append(item)
+                added += 1
+                if len(collected) >= max_fetch:
+                    break
+        return added
+
+    # 1차: 전체 기간 최신순 기준 최대 1,000건 수집
+    first_pass_target = min(max_fetch, 1000)
+    total_pages = max(1, (first_pass_target + 99) // 100)
+    for idx, start in enumerate(range(1, first_pass_target + 1, 100)):
+        status_placeholder.text(
+            f"네이버 블로그 데이터 수집 중... ({len(collected)}/{max_fetch}건)"
+        )
+        items = search_naver_blog(
+            query, client_id, client_secret, display=100, start=start
+        )
+        if not items:
+            break
+        _add_items(items)
+        progress_bar.progress(min(0.4, (idx + 1) / total_pages * 0.4))
+        if len(collected) >= max_fetch or len(items) < 100:
+            return collected
+
+    # 2차: max_fetch > 1,000인 경우 기간을 15일 단위 구간으로 나누어 추가 수집
+    if max_fetch > 1000:
+        windows: list[tuple[datetime, datetime]] = []
+        cursor = end_dt
+        while cursor > start_dt and len(windows) < 60:
+            win_start = max(start_dt, cursor - timedelta(days=15))
+            windows.append((win_start, cursor))
+            cursor = win_start - timedelta(days=1)
+
+        total_win = max(1, len(windows))
+        for w_idx, (w_start, w_end) in enumerate(windows):
+            if len(collected) >= max_fetch:
+                break
+            w_label = f"{w_start.strftime('%Y%m%d')}~{w_end.strftime('%Y%m%d')}"
+            status_placeholder.text(
+                f"기간 확장 수집 중 ({w_label})... ({len(collected)}/{max_fetch}건)"
+            )
+            # 기간 단서를 쿼리에 결합해 구간 내 최신 글 탐색
+            win_query = f"{query} {w_start.strftime('%Y.%m')}"
+            for start in range(1, 1001, 100):
+                items = search_naver_blog(
+                    win_query, client_id, client_secret, display=100, start=start
+                )
+                if not items:
+                    break
+                _add_items(items)
+                if len(collected) >= max_fetch or len(items) < 100:
+                    break
+            progress_bar.progress(0.4 + min(0.6, (w_idx + 1) / total_win * 0.6))
+
+    return collected
+
+
 def _clean_html_text(text: str) -> str:
     """HTML 태그를 제거하고 HTML 엔티티(&amp;, &quot; 등)를 원래 문자로 변환합니다."""
     if not text:
@@ -378,7 +455,7 @@ def render():
         + ", ".join([f"`{k}`" for k in sample_keywords[:8]])
     )
 
-    col_input1, col_input2, col_input3 = st.columns([2.5, 1, 1])
+    col_input1, col_input2, col_input3 = st.columns([2.4, 1.0, 1.2])
 
     with col_input1:
         keyword = st.text_input(
@@ -395,11 +472,15 @@ def render():
         )
 
     with col_input3:
-        max_fetch = st.selectbox(
-            "최대 수집 건수",
-            options=[300, 500, 1000],
-            index=2,
-            format_func=lambda x: f"최대 {x}건",
+        max_fetch = int(
+            st.number_input(
+                "최대 수집 건수",
+                min_value=100,
+                max_value=50000,
+                value=10000,
+                step=500,
+                help="기본값은 10,000건이며 원하는 숫자로 직접 수정할 수 있습니다. 1,000건 초과 시 기간 구간 분할로 추가 수집합니다.",
+            )
         )
 
     col_opt1, col_opt2 = st.columns([2.5, 1.5])
@@ -423,11 +504,10 @@ def render():
             help="체크 시 제목뿐 아니라 네이버 검색 결과의 본문 요약(description)에 제외 단어가 포함된 글도 제외합니다.",
         )
     with col_chk2:
-        # 검색 결과 누락 방지를 위해 기본값은 False로 설정
         only_single_mention = st.checkbox(
             "복수 종목 나열 제목 일부 제외 (선택)",
             value=False,
-            help="체크 시 슬래시(/)나 파이프(|) 등으로 여러 종목이 나열된 일부 제목을 제외합니다.",
+            help="체크 시 파이프(|) 등으로 여러 종목이 나열된 일부 제목을 제외합니다.",
         )
 
     if st.button("🚀 블로그 검색 시작", use_container_width=True, type="primary"):
@@ -440,24 +520,23 @@ def render():
             st.error("⚠️ 네이버 API Client ID와 Client Secret을 입력해 주세요.")
             return
 
+        now_kst = datetime.now(KST).replace(tzinfo=None)
+        cutoff_ts = pd.Timestamp(now_kst) - pd.DateOffset(months=months_filter)
+        cutoff_dt = cutoff_ts.to_pydatetime()
+
         status_text = st.empty()
         progress_bar = st.progress(0)
 
-        blog_items = []
-        max_start = min(max_fetch, 1000)
-        total_pages = max(1, (max_start + 99) // 100)
-
-        for idx, start in enumerate(range(1, max_start + 1, 100)):
-            status_text.text(
-                f"네이버 블로그 데이터 수집 중... ({start}~{start + 99}건)"
-            )
-            items = search_naver_blog(
-                clean_kw, client_id, client_secret, display=100, start=start
-            )
-            if not items:
-                break
-            blog_items.extend(items)
-            progress_bar.progress((idx + 1) / total_pages)
+        blog_items = fetch_blog_items_up_to(
+            query=clean_kw,
+            client_id=client_id,
+            client_secret=client_secret,
+            max_fetch=max_fetch,
+            start_dt=cutoff_dt,
+            end_dt=now_kst,
+            status_placeholder=status_text,
+            progress_bar=progress_bar,
+        )
 
         status_text.empty()
         progress_bar.empty()
@@ -483,9 +562,7 @@ def render():
             return
 
         # 정확한 개월 수 기준 기간 필터링 (KST 기준)
-        now_kst = datetime.now(KST).replace(tzinfo=None)
-        cutoff = pd.Timestamp(now_kst) - pd.DateOffset(months=months_filter)
-        df = df[df["postDate"] >= cutoff]
+        df = df[df["postDate"] >= cutoff_ts]
 
         if df.empty:
             st.warning(f"최근 {months_filter}개월 내 작성된 블로그 글이 없습니다.")
@@ -493,9 +570,9 @@ def render():
 
         # 제목 및 본문 요약 정제 (HTML 태그 및 엔티티 디코딩)
         df["clean_title"] = df["title"].apply(_clean_html_text)
-        df["clean_desc"] = df.get("description", pd.Series("", index=df.index)).apply(
-            _clean_html_text
-        )
+        df["clean_desc"] = df.get(
+            "description", pd.Series("", index=df.index)
+        ).apply(_clean_html_text)
 
         # 제외 단어 필터링
         exclude_list = [
@@ -515,7 +592,7 @@ def render():
                     )
                 ]
 
-        # 선택적 복수 나열 패턴 필터링 (과도한 탈락 방지)
+        # 선택적 복수 나열 패턴 필터링
         if only_single_mention:
             multi_list_pattern = re.compile(r"\s*[|]\s*")
             df = df[
@@ -531,7 +608,7 @@ def render():
         # 최신순 정렬
         df = df.sort_values("postDate", ascending=False)
 
-        # 결과 정리 (수집된 검색결과 전체 반영)
+        # 결과 정리
         result_df = df[["postDate", "clean_title", "link"]].copy()
         result_df["postDate"] = result_df["postDate"].dt.strftime("%Y-%m-%d")
         result_df.rename(
@@ -546,7 +623,7 @@ def render():
         # 기업 주가 데이터 조회
         with st.spinner(f"'{clean_kw}' 주가 데이터를 조회하는 중입니다..."):
             df_stock, ticker, resolved_name = fetch_stock_history(
-                clean_kw, cutoff.to_pydatetime(), now_kst, manual_ticker=manual_ticker
+                clean_kw, cutoff_dt, now_kst, manual_ticker=manual_ticker
             )
 
         filter_info = (
@@ -606,7 +683,7 @@ def render():
                 df_stock=df_stock,
                 keyword=clean_kw,
                 ticker=ticker,
-                start_date=cutoff.to_pydatetime(),
+                start_date=cutoff_dt,
                 end_date=now_kst,
             )
             st.plotly_chart(fig, use_container_width=True)
