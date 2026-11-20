@@ -73,88 +73,26 @@ def _extract_blog_key(row: pd.Series) -> str:
     return str(row.get("link", ""))
 
 
-def fetch_blog_items_up_to(
-    query: str,
-    client_id: str,
-    client_secret: str,
-    max_fetch: int,
-    start_dt: datetime,
-    end_dt: datetime,
-    status_placeholder,
-    progress_bar,
-) -> list[dict]:
-    """최대 수집 건수까지 네이버 블로그 글을 수집합니다 (1,000건 초과 시 기간 분할 수집 병행)."""
-    collected: list[dict] = []
-    seen_links: set[str] = set()
-
-    def _add_items(raw_items: list[dict]) -> int:
-        added = 0
-        for item in raw_items:
-            link = item.get("link", "")
-            key = link or json.dumps(item, ensure_ascii=False)
-            if key not in seen_links:
-                seen_links.add(key)
-                collected.append(item)
-                added += 1
-                if len(collected) >= max_fetch:
-                    break
-        return added
-
-    # 1차: 전체 기간 최신순 기준 최대 1,000건 수집
-    first_pass_target = min(max_fetch, 1000)
-    total_pages = max(1, (first_pass_target + 99) // 100)
-    for idx, start in enumerate(range(1, first_pass_target + 1, 100)):
-        status_placeholder.text(
-            f"네이버 블로그 데이터 수집 중... ({len(collected)}/{max_fetch}건)"
-        )
-        items = search_naver_blog(
-            query, client_id, client_secret, display=100, start=start
-        )
-        if not items:
-            break
-        _add_items(items)
-        progress_bar.progress(min(0.4, (idx + 1) / total_pages * 0.4))
-        if len(collected) >= max_fetch or len(items) < 100:
-            return collected
-
-    # 2차: max_fetch > 1,000인 경우 기간을 15일 단위 구간으로 나누어 추가 수집
-    if max_fetch > 1000:
-        windows: list[tuple[datetime, datetime]] = []
-        cursor = end_dt
-        while cursor > start_dt and len(windows) < 60:
-            win_start = max(start_dt, cursor - timedelta(days=15))
-            windows.append((win_start, cursor))
-            cursor = win_start - timedelta(days=1)
-
-        total_win = max(1, len(windows))
-        for w_idx, (w_start, w_end) in enumerate(windows):
-            if len(collected) >= max_fetch:
-                break
-            w_label = f"{w_start.strftime('%Y%m%d')}~{w_end.strftime('%Y%m%d')}"
-            status_placeholder.text(
-                f"기간 확장 수집 중 ({w_label})... ({len(collected)}/{max_fetch}건)"
-            )
-            win_query = f"{query} {w_start.strftime('%Y.%m')}"
-            for start in range(1, 1001, 100):
-                items = search_naver_blog(
-                    win_query, client_id, client_secret, display=100, start=start
-                )
-                if not items:
-                    break
-                _add_items(items)
-                if len(collected) >= max_fetch or len(items) < 100:
-                    break
-            progress_bar.progress(0.4 + min(0.6, (w_idx + 1) / total_win * 0.6))
-
-    return collected
-
-
 def _clean_html_text(text: str) -> str:
     """HTML 태그를 제거하고 HTML 엔티티(&amp;, &quot; 등)를 원래 문자로 변환합니다."""
     if not text:
         return ""
     no_tags = re.sub(r"<.*?>", "", str(text))
     return html.unescape(no_tags).strip()
+
+
+def _title_contains_keyword(title: str, keyword: str) -> bool:
+    """블로그 제목에 검색 키워드가 포함되어 있는지 확인합니다."""
+    if not title or not keyword:
+        return False
+    t_lower = title.lower()
+    k_lower = keyword.lower()
+    if k_lower in t_lower:
+        return True
+    # 공백 차이(예: 'AI 반도체' vs 'AI반도체')도 허용
+    t_nospace = re.sub(r"\s+", "", t_lower)
+    k_nospace = re.sub(r"\s+", "", k_lower)
+    return bool(k_nospace) and (k_nospace in t_nospace)
 
 
 # ==============================================================================
@@ -435,9 +373,9 @@ def build_price_and_blog_chart(
 # 6. Streamlit 화면 렌더링
 # ==============================================================================
 def render():
-    st.title("🔍 네이버 블로그 키워드 단독 언급 검색기")
+    st.title("🔍 네이버 블로그 제목 키워드 검색기")
     st.markdown(
-        "네이버 블로그에서 검색된 글 목록을 최근 작성일 순으로 확인하고, "
+        "네이버 블로그에서 검색 키워드가 **제목에 포함된 글**만 필터링해 최근 작성일 순으로 확인하고, "
         "**주가 추이와 블로그 언급량**을 함께 비교합니다."
     )
 
@@ -497,10 +435,10 @@ def render():
             st.number_input(
                 "최대 수집 건수",
                 min_value=100,
-                max_value=50000,
-                value=10000,
-                step=500,
-                help="기본값은 10,000건이며 원하는 숫자로 직접 수정할 수 있습니다. 1,000건 초과 시 기간 구간 분할로 추가 수집합니다.",
+                max_value=1000,
+                value=1000,
+                step=100,
+                help="기본값은 1,000건이며 100~1,000건 범위에서 직접 수정할 수 있습니다.",
             )
         )
 
@@ -554,16 +492,23 @@ def render():
         status_text = st.empty()
         progress_bar = st.progress(0)
 
-        blog_items = fetch_blog_items_up_to(
-            query=clean_kw,
-            client_id=client_id,
-            client_secret=client_secret,
-            max_fetch=max_fetch,
-            start_dt=cutoff_dt,
-            end_dt=now_kst,
-            status_placeholder=status_text,
-            progress_bar=progress_bar,
-        )
+        blog_items = []
+        total_pages = max(1, (max_fetch + 99) // 100)
+
+        for idx, start in enumerate(range(1, max_fetch + 1, 100)):
+            page_display = min(100, max_fetch - start + 1)
+            status_text.text(
+                f"네이버 블로그 데이터 수집 중... ({start}~{start + page_display - 1}건)"
+            )
+            items = search_naver_blog(
+                clean_kw, client_id, client_secret, display=page_display, start=start
+            )
+            if not items:
+                break
+            blog_items.extend(items)
+            progress_bar.progress((idx + 1) / total_pages)
+            if len(items) < page_display:
+                break
 
         status_text.empty()
         progress_bar.empty()
@@ -601,6 +546,9 @@ def render():
             "description", pd.Series("", index=df.index)
         ).apply(_clean_html_text)
 
+        # 본문만 매칭된 글 제외: 제목에 검색 키워드가 포함된 글만 대상
+        df = df[df["clean_title"].apply(lambda t: _title_contains_keyword(t, clean_kw))]
+
         # 제외 단어 필터링
         exclude_list = [
             w.strip() for w in exclude_words_input.split(",") if w.strip()
@@ -628,7 +576,7 @@ def render():
 
         if df.empty:
             st.warning(
-                "선택하신 필터링 조건(기간, 제외 단어)을 만족하는 블로그 글이 없습니다."
+                "제목에 검색 키워드가 포함된 글 중 선택하신 조건을 만족하는 결과가 없습니다."
             )
             return
 
@@ -656,12 +604,12 @@ def render():
                 clean_kw, cutoff_dt, now_kst, manual_ticker=manual_ticker
             )
 
-        filter_notes = []
+        filter_notes = ["제목 키워드 일치"]
         if exclude_list:
             filter_notes.append(f"제외 단어: {', '.join(exclude_list)}")
         if only_latest_per_blog:
             filter_notes.append("블로그별 최신 1건")
-        filter_info = f" ({' · '.join(filter_notes)})" if filter_notes else ""
+        filter_info = f" ({' · '.join(filter_notes)})"
 
         st.success(
             f"🎉 총 **{len(result_df)}건**의 블로그 글을 수집했습니다!{filter_info}"
