@@ -93,16 +93,13 @@ def resolve_korean_ticker(
     if not query:
         return [], ""
 
-    # 1) 6자리 종목코드를 직접 입력한 경우
     if re.fullmatch(r"\d{6}", query):
         return [f"{query}.KS", f"{query}.KQ"], query
 
-    # 2) 이미 .KS 또는 .KQ 접미사가 붙은 경우
     upper_q = query.upper()
     if upper_q.endswith((".KS", ".KQ")):
         return [upper_q], upper_q
 
-    # 3) 네이버 증권 자동완성 API로 종목코드 및 시장구분(KOSPI/KOSDAQ) 조회
     candidates: list[str] = []
     resolved_name = query
     try:
@@ -137,7 +134,6 @@ def resolve_korean_ticker(
     except Exception:
         pass
 
-    # 4) Yahoo Finance 검색 백업
     if not candidates:
         try:
             yf_url = (
@@ -215,7 +211,7 @@ def create_excel_with_hyperlinks(df, sheet_name="블로그글"):
 
 
 # ==============================================================================
-# 5. 주가(기본축) & 블로그 글 건수(보조축) 이중축 차트 생성
+# 5. 주가(기본축) & 블로그 글 건수(보조축) 이중축 선 차트 생성
 # ==============================================================================
 def build_price_and_blog_chart(
     result_df: pd.DataFrame,
@@ -249,28 +245,19 @@ def build_price_and_blog_chart(
         merged = pd.merge(merged, df_stock, on="Date", how="left")
         merged["Close"] = merged["Close"].ffill().bfill()
 
+    # 4. 날짜를 숫자 문자열(YYYYMMDD)로 변환하여 X축에 표기
+    merged["DateNum"] = merged["Date"].str.replace("-", "", regex=False)
+
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-    # 보조축(우측): 일별 블로그 글 건수 (막대 차트)
-    fig.add_trace(
-        go.Bar(
-            x=merged["Date"],
-            y=merged["블로그건수"],
-            name="블로그 글 건수 (건)",
-            marker_color="rgba(56, 189, 248, 0.45)",
-            hovertemplate="날짜: %{x}<br>블로그 건수: %{y}건<extra></extra>",
-        ),
-        secondary_y=True,
-    )
-
-    # 기본축(좌측): 기업 주가 (라인 차트)
+    # 기본축(좌측): 기업 주가 (선 차트)
     if has_stock:
         label_name = (
             f"{keyword} 주가 ({ticker})" if ticker else f"{keyword} 주가"
         )
         fig.add_trace(
             go.Scatter(
-                x=merged["Date"],
+                x=merged["DateNum"],
                 y=merged["Close"],
                 name=label_name,
                 mode="lines",
@@ -279,6 +266,20 @@ def build_price_and_blog_chart(
             ),
             secondary_y=False,
         )
+
+    # 보조축(우측): 일별 블로그 글 건수 (선 차트)
+    fig.add_trace(
+        go.Scatter(
+            x=merged["DateNum"],
+            y=merged["블로그건수"],
+            name="블로그 글 건수 (건)",
+            mode="lines+markers",
+            line=dict(color="#38bdf8", width=2),
+            marker=dict(size=5, color="#38bdf8"),
+            hovertemplate="날짜: %{x}<br>블로그 건수: %{y}건<extra></extra>",
+        ),
+        secondary_y=True,
+    )
 
     title_suffix = (
         f"주가 ({ticker}) vs 블로그 언급량"
@@ -301,7 +302,14 @@ def build_price_and_blog_chart(
             xanchor="right",
             x=1.0,
         ),
-        bargap=0.15,
+    )
+
+    # X축 날짜 숫자 표기 설정
+    fig.update_xaxes(
+        type="category",
+        title_text="날짜 (YYYYMMDD)",
+        tickmode="auto",
+        nticks=8,
     )
 
     # 기본축(좌측 Y축) 설정
