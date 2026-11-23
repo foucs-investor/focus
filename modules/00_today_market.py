@@ -104,7 +104,7 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
 
     elif any(
         keyword in lower_name or keyword in lower_theme
-        for keyword in ["로봇", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]
+        for keyword in ["로봇", "휴머노이드", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]
     ):
         return "로봇/자동차/2차전지"
 
