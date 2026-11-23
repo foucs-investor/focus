@@ -81,6 +81,9 @@ etf_tickers = {
     # 기타
     "438740.KS": "MIDAS 중소형액티브",
     "418670.KS": "TIGER 글로벌AI사이버보안",
+
+    #로봇
+    "0177X0.KS": "ACE K휴머노이드로봇산업TOP2+",
 }
 
 @st.cache_data(ttl=300)
