@@ -46,6 +46,7 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
             "미디어",
             "게임",
             "컨텐츠",
+            "콘텐츠",
             "웹툰",
             "플랫폼",
             "인터넷",
