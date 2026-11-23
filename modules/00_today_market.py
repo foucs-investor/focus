@@ -27,15 +27,18 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     lower_name = (full_name or "").lower()
     lower_theme = (theme_name or "").lower()
 
+    # 시장 지표 자체는 별도의 대분류 명칭 부여
     if ticker in ["^KS11", "^KQ11"]:
         return "시장 지표 (KOSPI/KOSDAQ)"
 
+    # 화장품/음식료 및 K뷰티 통합 그룹화
     if any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["화장품", "k뷰티", "k-뷰티", "뷰티", "푸드"]
     ):
         return "화장품/음식료"
 
+    # 1. 엔터/컨텐츠/인터넷 그룹 (ACE KPOP포커스 포함)
     elif ticker == "475050.KS" or any(
         keyword in lower_name or keyword in lower_theme
         for keyword in [
@@ -46,7 +49,6 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
             "미디어",
             "게임",
             "컨텐츠",
-            "콘텐츠",
             "웹툰",
             "플랫폼",
             "인터넷",
@@ -55,56 +57,65 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     ):
         return "엔터/컨텐츠/인터넷"
 
+    # 3. 반도체 그룹
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["반도체", "소부장", "후공정", "장비", "메모리"]
     ):
-        return "반도체/기판"
+        return "반도체"
 
+    # 4. 금융 그룹
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["증권", "은행", "금융", "보험", "지주사"]
     ):
         return "금융"
 
+    # 5. 바이오/헬스케어 그룹
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["바이오", "헬스케어", "제약", "의료기기", "의료"]
     ):
         return "바이오/헬스케어"
 
+    # 6. AI/인공지능/소프트웨어 그룹
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["인공지능", "소프트웨어", "클라우드", "software", "보안", "it"]
     ):
         return "IT·소프트웨어"
 
+    # 7. 조선/방산/우주 그룹
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["조선", "방산", "우주", "항공"]
     ):
         return "조선/방산"
 
+    # 8. 친환경에너지
     elif any(
         keyword in lower_name or keyword in lower_theme for keyword in ["친환경"]
     ):
         return "친환경에너지"
 
+    # 9. 소비재
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["생활소비", "경기소비"]
     ):
         return "소비재"
 
+    # 10. AIDC
     elif any(
         keyword in lower_name or keyword in lower_theme
         for keyword in ["건설", "설비", "원자력"]
     ):
         return "AIDC"
 
+    # 11. 로봇/자동차/2차전지
     elif any(
         keyword in lower_name or keyword in lower_theme
-        for keyword in ["로봇", "휴머노이드", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]
+        for keyword in ["로봇", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]
     ):
         return "로봇/자동차/2차전지"
 
@@ -112,6 +123,7 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
 
 
 def _to_float(val) -> float | None:
+    """문자열/숫자 값을 안전하게 float으로 변환"""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -125,14 +137,52 @@ def _to_float(val) -> float | None:
         return None
 
 
+def _extract_kr_code(ticker: str) -> str | None:
+    """'475310.KS' 또는 '0177X0.KS' 등에서 6자리 영숫자 종목코드 추출"""
+    code = str(ticker).split(".")[0].strip().upper()
+    if len(code) == 6 and code.isalnum():
+        return code
+    return None
+
+
 def _clean_etf_name(raw_name: str | None, ticker: str) -> str:
-    """티커 대신 화면에 표시할 깔끔한 ETF명을 반환"""
+    """티커 대신 화면에 표시할 깔끔한 ETF명 반환"""
     if raw_name and isinstance(raw_name, str):
         name = raw_name.strip()
-        # 이름이 비어있거나 원본 티커와 같으면 유효한 ETF명으로 보지 않음
-        if name and name.upper() != ticker.upper():
+        if name and name.upper() != str(ticker).upper():
             return name
-    return ticker
+    return str(ticker)
+
+
+def _normalize_tickers_and_names(tickers_obj, name_mapping_obj) -> tuple[list[str], dict[str, str]]:
+    """
+    utils.py의 etf_tickers(list 또는 dict)와 name_mapping을 정규화해
+    (티커 리스트, {티커: ETF명} 딕셔너리) 반환
+    """
+    normalized_tickers: list[str] = []
+    normalized_names: dict[str, str] = {}
+
+    if isinstance(name_mapping_obj, dict):
+        for k, v in name_mapping_obj.items():
+            if k is not None and v:
+                normalized_names[str(k)] = str(v).strip()
+
+    if isinstance(tickers_obj, dict):
+        for k, v in tickers_obj.items():
+            t_str = str(k).strip()
+            if t_str:
+                normalized_tickers.append(t_str)
+                if v and t_str not in normalized_names:
+                    normalized_names[t_str] = str(v).strip()
+    elif isinstance(tickers_obj, (list, tuple, set)):
+        for item in tickers_obj:
+            t_str = str(item).strip()
+            if t_str:
+                normalized_tickers.append(t_str)
+
+    # 중복 제거하되 순서 유지
+    unique_tickers = list(dict.fromkeys(normalized_tickers))
+    return unique_tickers, normalized_names
 
 
 def _fetch_naver_index_api(ticker: str) -> tuple[float, float] | None:
@@ -180,8 +230,8 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> tuple[dict[str, float], dict[st
     """
     code_to_tickers: dict[str, list[str]] = {}
     for t in tickers:
-        code = t.split(".")[0].strip()
-        if code.isdigit():
+        code = _extract_kr_code(t)
+        if code:
             code_to_tickers.setdefault(code, []).append(t)
 
     codes = list(code_to_tickers.keys())
@@ -204,7 +254,7 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> tuple[dict[str, float], dict[st
             datas = payload.get("datas") if isinstance(payload, dict) else None
             if isinstance(datas, list):
                 for item in datas:
-                    item_code = str(item.get("itemCode", "")).strip()
+                    item_code = str(item.get("itemCode", "")).strip().upper()
                     rate_val = _to_float(item.get("fluctuationsRatio"))
                     etf_name = (
                         item.get("stockName")
@@ -220,6 +270,7 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> tuple[dict[str, float], dict[st
         except Exception:
             continue
 
+    # 배치에서 누락된 종목은 개별 /basic API로 보완
     missing_codes = [
         c
         for c, t_list in code_to_tickers.items()
@@ -275,22 +326,21 @@ def _get_index_quote(ticker: str) -> tuple[float, float]:
 
 
 def _get_etf_returns_and_names(
-    tickers: list[str], etf_data: pd.DataFrame, name_mapping: dict
+    tickers: list[str], etf_data: pd.DataFrame, base_names: dict[str, str]
 ) -> tuple[dict[str, float], dict[str, str]]:
     """
     ETF 등락률(%)과 표시용 ETF명 조회:
     - 등락률: 네이버 API 우선 -> yfinance 일봉 폴백
-    - ETF명: name_mapping 우선 -> 네이버 API 종목명 -> 폴백
+    - ETF명: utils 매핑/딕셔너리 우선 -> 네이버 API 종목명 -> 폴백
     """
     returns, naver_names = _fetch_naver_etfs_api(tickers)
     resolved_names: dict[str, str] = {}
 
     for t in tickers:
-        mapped_name = name_mapping.get(t) if isinstance(name_mapping, dict) else None
-        candidate_name = mapped_name or naver_names.get(t)
+        candidate_name = base_names.get(t) or naver_names.get(t)
         resolved_names[t] = _clean_etf_name(candidate_name, t)
 
-        if t not in returns and t in etf_data.columns:
+        if t not in returns and not etf_data.empty and t in etf_data.columns:
             series = etf_data[t].dropna()
             if len(series) >= 2:
                 prev_c = float(series.iloc[-2])
@@ -301,15 +351,44 @@ def _get_etf_returns_and_names(
     return returns, resolved_names
 
 
+def _load_etf_history_safely(tickers: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
+    """download_etf_data를 호출하되, 빈 결과나 예외가 발생해도 안전하게 처리"""
+    df_raw = pd.DataFrame()
+    name_map: dict[str, str] = {}
+    try:
+        res = download_etf_data(tickers, period="10d")
+        if isinstance(res, tuple) and len(res) >= 2:
+            if isinstance(res[0], pd.DataFrame):
+                df_raw = res[0].copy()
+            if isinstance(res[1], dict):
+                name_map = res[1]
+        elif isinstance(res, pd.DataFrame):
+            df_raw = res.copy()
+    except Exception:
+        pass
+
+    if not df_raw.empty:
+        df_raw.index = pd.to_datetime(df_raw.index)
+    return df_raw, name_map
+
+
 def render():
     now = datetime.now(KST)
     run_date_str = now.strftime("%Y-%m-%d")
     run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
 
-    with st.spinner(f"{run_timestamp} 기준 네이버 시세 API 데이터를 가져오는 중입니다..."):
-        df_raw, name_mapping = download_etf_data(etf_tickers, period="10d")
-        etf_data = df_raw.copy()
-        etf_data.index = pd.to_datetime(etf_data.index)
+    # 상단 새로고침 버튼으로 캐시 클리어 지원
+    col_title, col_btn = st.columns([8, 2])
+    with col_btn:
+        if st.button("🔄 시세 새로고침", key="refresh_today_market"):
+            st.cache_data.clear()
+            st.rerun()
+
+    normalized_tickers, pre_names = _normalize_tickers_and_names(etf_tickers, {})
+
+    with st.spinner(f"{run_timestamp} 기준 최신 시장 및 ETF 시세 데이터를 가져오는 중입니다..."):
+        df_raw, mapped_from_dl = _load_etf_history_safely(normalized_tickers)
+        _, merged_names = _normalize_tickers_and_names(etf_tickers, {**pre_names, **mapped_from_dl})
 
         index_tickers = {"^KS11": "코스피 (KOSPI)", "^KQ11": "코스닥 (KOSDAQ)"}
         idx_returns: dict[str, float] = {}
@@ -321,7 +400,7 @@ def render():
             idx_returns[ticker] = ret
 
         latest_returns, etf_names = _get_etf_returns_and_names(
-            etf_tickers, etf_data, name_mapping or {}
+            normalized_tickers, df_raw, merged_names
         )
 
     kospi_ret = idx_returns.get("^KS11", 0.0)
@@ -329,6 +408,7 @@ def render():
     kosdaq_ret = idx_returns.get("^KQ11", 0.0)
     kosdaq_val = idx_latest_vals.get("^KQ11", 0.0)
 
+    # 코스피와 코스닥 중 변동폭(절대값)이 더 큰 기준 지수 결정
     if abs(kosdaq_ret) >= abs(kospi_ret):
         base_index_ret = kosdaq_ret
         base_index_name = "코스닥"
@@ -341,6 +421,7 @@ def render():
 
     tree_data = []
 
+    # 1. 시장 지표 데이터
     for idx_t, idx_name in index_tickers.items():
         ret = idx_returns.get(idx_t, 0.0)
         if not pd.isna(ret):
@@ -358,14 +439,11 @@ def render():
                 "Status": status,
             })
 
+    # 2. ETF 테마 데이터 (ETF명 우선 표기)
     for ticker, ret in latest_returns.items():
         if pd.isna(ret):
             continue
-        # 티커가 아니라 ETF명이 항상 우선 표시되도록 설정
-        full_name = etf_names.get(ticker) or _clean_etf_name(
-            name_mapping.get(ticker) if isinstance(name_mapping, dict) else None,
-            ticker,
-        )
+        full_name = etf_names.get(ticker) or _clean_etf_name(merged_names.get(ticker), ticker)
         raw_theme = clean_theme_name(full_name)
         theme_name = group_theme_category(ticker, full_name, raw_theme)
 
@@ -408,6 +486,7 @@ def render():
     else:
         rise_count, fall_count, rise_pct, fall_pct = 0, 0, 0.0, 0.0
 
+    # 상단 요약 바
     st.markdown(
         f"""
         <div style="position: sticky; top: 0; z-index: 999; background-color: #0f172a; padding: 16px 24px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);">
@@ -431,6 +510,11 @@ def render():
         unsafe_allow_html=True,
     )
 
+    if df_tree.empty:
+        st.warning("표시할 시세 데이터가 없습니다. 종목코드 또는 네트워크 상태를 확인해 주세요.")
+        return
+
+    # Plotly 트리맵 생성 (ETF명 표기)
     fig = px.treemap(
         df_tree,
         path=["Theme", "FullName"],
@@ -450,7 +534,12 @@ def render():
             family="Malgun Gothic, Apple SD Gothic Neo, sans-serif",
         ),
         hovertemplate=(
-            "<b>대분류:</b> %{parent}<br><b>세부 테마:</b> %{customdata[2]}<br><b>ETF명:</b> %{customdata[5]}<br><b>티커:</b> %{customdata[0]}<br><b>당일 등락률:</b> %{customdata[1]:+.2f}%<br><b>기준지수 대비:</b> %{customdata[3]:+.2f}%<extra></extra>"
+            "<b>대분류:</b> %{parent}<br>"
+            "<b>세부 테마:</b> %{customdata[2]}<br>"
+            "<b>ETF명:</b> %{customdata[5]}<br>"
+            "<b>티커:</b> %{customdata[0]}<br>"
+            "<b>당일 등락률:</b> %{customdata[1]:+.2f}%<br>"
+            "<b>기준지수 대비:</b> %{customdata[3]:+.2f}%<extra></extra>"
         ),
     )
 
