@@ -1,7 +1,6 @@
 # modules/00_today_market.py
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
-import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -10,6 +9,7 @@ from utils import clean_theme_name, download_etf_data, etf_tickers
 
 # 사이드바 라디오 버튼에 표시될 메뉴명
 MENU_NAME = "오늘 시장"
+KST = ZoneInfo("Asia/Seoul")
 
 
 def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
@@ -112,62 +112,137 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     return theme_name
 
 
+def _get_latest_index_quote(ticker: str, now_kst: datetime) -> tuple[float, float, str]:
+    """실행 시각(KST) 기준으로 지수의 최신가, 등락률(%), 데이터 기준일자를 반환"""
+    t_obj = yf.Ticker(ticker)
+    hist = t_obj.history(period="5d", interval="1d")
+    hist_date_str = ""
+
+    if not hist.empty:
+        idx_ts = pd.Timestamp(hist.index[-1])
+        if idx_ts.tzinfo is None:
+            idx_ts = idx_ts.tz_localize("UTC").tz_convert(KST)
+        else:
+            idx_ts = idx_ts.tz_convert(KST)
+        hist_date_str = idx_ts.strftime("%Y-%m-%d")
+
+    # 장중(09:00~15:35 KST)에는 fast_info의 실시간/최근 체결가를 우선 반영
+    is_regular_market_hours = (
+        now_kst.weekday() < 5
+        and time(9, 0) <= now_kst.time() <= time(15, 45)
+    )
+
+    if is_regular_market_hours:
+        try:
+            fi = t_obj.fast_info
+            curr_val = getattr(fi, "last_price", None)
+            prev_close = getattr(fi, "previous_close", None)
+            if curr_val and prev_close and float(prev_close) != 0:
+                curr_f = float(curr_val)
+                prev_f = float(prev_close)
+                ret = (curr_f - prev_f) / prev_f * 100.0
+                return curr_f, ret, now_kst.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    if len(hist) >= 2:
+        curr_f = float(hist["Close"].iloc[-1])
+        prev_f = float(hist["Close"].iloc[-2])
+        ret = ((curr_f - prev_f) / prev_f * 100.0) if prev_f != 0 else 0.0
+        return curr_f, ret, hist_date_str
+    elif len(hist) == 1:
+        curr_f = float(hist["Close"].iloc[-1])
+        return curr_f, 0.0, hist_date_str
+
+    return 0.0, 0.0, now_kst.strftime("%Y-%m-%d")
+
+
+def _get_etf_latest_returns(
+    etf_data: pd.DataFrame, tickers: list[str], now_kst: datetime
+) -> tuple[pd.Series, str]:
+    """실행 시각(KST) 기준으로 ETF 등락률(%)과 데이터 기준일자를 반환"""
+    data_date_str = ""
+    if not etf_data.empty:
+        last_idx = pd.Timestamp(etf_data.index[-1])
+        if last_idx.tzinfo is None:
+            last_idx = last_idx.tz_localize("UTC").tz_convert(KST)
+        else:
+            last_idx = last_idx.tz_convert(KST)
+        data_date_str = last_idx.strftime("%Y-%m-%d")
+
+    is_regular_market_hours = (
+        now_kst.weekday() < 5
+        and time(9, 0) <= now_kst.time() <= time(15, 45)
+    )
+
+    # 일봉 데이터에 이미 오늘 날짜 봉이 포함된 경우 vs 장중 실시간가 반영이 필요한 경우
+    returns_map: dict[str, float] = {}
+
+    if len(etf_data) >= 2:
+        etf_pct = etf_data.pct_change() * 100.0
+        latest_row = etf_pct.iloc[-1]
+        for col in etf_data.columns:
+            if pd.notna(latest_row.get(col)):
+                returns_map[col] = float(latest_row[col])
+
+    # 장중에는 ETF 실시간 체결가(fast_info.last_price) 기준으로 당일 등락률 갱신 시도
+    if is_regular_market_hours and data_date_str != now_kst.strftime("%Y-%m-%d"):
+        updated_any = False
+        for ticker in tickers:
+            if ticker not in etf_data.columns or len(etf_data[ticker].dropna()) == 0:
+                continue
+            ref_prev_close = float(etf_data[ticker].dropna().iloc[-1])
+            try:
+                fi = yf.Ticker(ticker).fast_info
+                last_p = getattr(fi, "last_price", None)
+                if last_p and float(last_p) > 0 and ref_prev_close > 0:
+                    returns_map[ticker] = (float(last_p) - ref_prev_close) / ref_prev_close * 100.0
+                    updated_any = True
+            except Exception:
+                continue
+        if updated_any:
+            data_date_str = now_kst.strftime("%Y-%m-%d")
+
+    return pd.Series(returns_map, dtype=float), (data_date_str or now_kst.strftime("%Y-%m-%d"))
+
+
 def render():
-    with st.spinner("최신 시장 및 ETF 시세 데이터를 가져오는 중입니다..."):
+    # 실행 시점의 한국 표준시(Asia/Seoul) 기준 날짜/시각
+    now = datetime.now(KST)
+    run_date_str = now.strftime("%Y-%m-%d")
+    run_time_str = now.strftime("%H:%M:%S")
+    run_timestamp = f"{run_date_str} {run_time_str} (KST)"
+
+    with st.spinner(f"{run_timestamp} 기준 최신 시장 및 ETF 시세 데이터를 가져오는 중입니다..."):
         # 1. 기존 ETF 데이터 다운로드
         df_raw, name_mapping = download_etf_data(etf_tickers, period="1mo")
         etf_data = df_raw.ffill().bfill()
         etf_data.index = pd.to_datetime(etf_data.index)
 
-        # 2. 코스피(^KS11), 코스닥(^KQ11) 지수 데이터 정밀 다운로드
+        # 2. 코스피(^KS11), 코스닥(^KQ11) 지수 데이터 조회
         index_tickers = {"^KS11": "코스피 (KOSPI)", "^KQ11": "코스닥 (KOSDAQ)"}
+        idx_returns: dict[str, float] = {}
+        idx_latest_vals: dict[str, float] = {}
+        idx_dates: list[str] = []
 
-        idx_returns = {}
-        idx_latest_vals = {}
+        for ticker in index_tickers:
+            val, ret, d_str = _get_latest_index_quote(ticker, now)
+            idx_latest_vals[ticker] = val
+            idx_returns[ticker] = ret
+            if d_str:
+                idx_dates.append(d_str)
 
-        for ticker, name in index_tickers.items():
-            t_obj = yf.Ticker(ticker)
-            try:
-                fi = t_obj.fast_info
-                curr_val = fi.last_price
-                prev_close = fi.previous_close
-                if curr_val and prev_close:
-                    ret = (curr_val - prev_close) / prev_close * 100
-                    idx_latest_vals[ticker] = curr_val
-                    idx_returns[ticker] = ret
-                    continue
-            except Exception:
-                pass
+        # 3. 실행 시각 기준 ETF 등락률 계산
+        latest_returns, etf_data_date = _get_etf_latest_returns(etf_data, etf_tickers, now)
 
-            hist = t_obj.history(period="5d")
-            if len(hist) >= 2:
-                curr_val = hist["Close"].iloc[-1]
-                prev_close = hist["Close"].iloc[-2]
-                ret = (curr_val - prev_close) / prev_close * 100
-                idx_latest_vals[ticker] = curr_val
-                idx_returns[ticker] = ret
-            else:
-                idx_latest_vals[ticker] = 0.0
-                idx_returns[ticker] = 0.0
+    # 실제 반영된 시세 기준일 (가장 늦은 기준일 또는 ETF 기준일)
+    all_dates = [d for d in idx_dates + [etf_data_date] if d]
+    effective_data_date = max(all_dates) if all_dates else run_date_str
 
-    # 당일 등락률 계산 (ETF)
-    etf_pct = etf_data.pct_change()
-    latest_returns = (
-        etf_pct.iloc[-1] * 100
-        if not etf_pct.empty
-        else pd.Series(dtype=float)
-    )
-
-    # [수정] 한국 표준시(Asia/Seoul) 기준으로 당일 날짜 및 시각 반영
-    now = datetime.now(ZoneInfo("Asia/Seoul"))
-    base_date_str = now.strftime("%Y-%m-%d")
-    current_time_str = now.strftime("%H:%M")
-    full_timestamp = f"{base_date_str} {current_time_str}"
-
-    kospi_ret = idx_returns.get("^KS11", 0)
-    kospi_val = idx_latest_vals.get("^KS11", 0)
-    kosdaq_ret = idx_returns.get("^KQ11", 0)
-    kosdaq_val = idx_latest_vals.get("^KQ11", 0)
+    kospi_ret = idx_returns.get("^KS11", 0.0)
+    kospi_val = idx_latest_vals.get("^KS11", 0.0)
+    kosdaq_ret = idx_returns.get("^KQ11", 0.0)
+    kosdaq_val = idx_latest_vals.get("^KQ11", 0.0)
 
     # 코스피와 코스닥 중 변동폭(절대값)이 더 큰 기준 지수 결정
     if abs(kosdaq_ret) >= abs(kospi_ret):
@@ -184,7 +259,7 @@ def render():
 
     # 1. 시장 지표 데이터 (좌측 상단 고정)
     for idx_t, idx_name in index_tickers.items():
-        ret = idx_returns.get(idx_t, 0)
+        ret = idx_returns.get(idx_t, 0.0)
         if not pd.isna(ret):
             status = "상승" if ret >= 0 else "하락"
             tree_data.append({
@@ -206,7 +281,6 @@ def render():
             continue
         full_name = name_mapping.get(ticker, ticker)
         raw_theme = clean_theme_name(full_name)
-
         theme_name = group_theme_category(ticker, full_name, raw_theme)
 
         # 기준 지수 대비 차이(초과 수익/부진) 계산
@@ -222,12 +296,8 @@ def render():
             )
 
         status = "상승" if ret >= 0 else "하락"
-
         abs_ret = abs(ret)
-        if ticker == "475050.KS":
-            size_val = max(abs_ret + 3.0, 5.0)
-        else:
-            size_val = abs_ret + 1.5
+        size_val = max(abs_ret + 3.0, 5.0) if ticker == "475050.KS" else abs_ret + 1.5
 
         tree_data.append({
             "Ticker": ticker,
@@ -254,7 +324,7 @@ def render():
     else:
         rise_count, fall_count, rise_pct, fall_pct = 0, 0, 0.0, 0.0
 
-    # 상단 요약 바 (고정형) - 상승/하락 통계 추가
+    # 상단 요약 바 (고정형) - 실행 시각 및 시세 기준일 명시
     st.markdown(
         f"""
         <div style="position: sticky; top: 0; z-index: 999; background-color: #0f172a; padding: 16px 24px; border-radius: 12px; margin-bottom: 20px; border: 1px solid #334155; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);">
@@ -263,9 +333,9 @@ def render():
                     <div><span style="color: #94a3b8; font-size: 17px;">📈 코스피 (KOSPI)</span><br><span style="color: {kospi_color}; font-size: 22px;"><b>{kospi_val:,.2f} ({kospi_ret:+.2f}%)</b></span></div>
                     <div style="border-left: 1px solid #334155; padding-left: 30px;"><span style="color: #94a3b8; font-size: 17px;">📉 코스닥 (KOSDAQ)</span><br><span style="color: {kosdaq_color}; font-size: 22px;"><b>{kosdaq_val:,.2f} ({kosdaq_ret:+.2f}%)</b></span></div>
                 </div>
-                <div style="text-align: right; color: #94a3b8; font-size: 16px;">
+                <div style="text-align: right; color: #94a3b8; font-size: 15px;">
                     기준 비교 지수: <b style="color: #38bdf8;">{base_index_name} ({base_index_ret:+.2f}%)</b><br>
-                    기준 시점: <b style="color: #f8fafc;">{full_timestamp}</b>
+                    시세 기준일: <b style="color: #fbbf24;">{effective_data_date}</b> · 조회 시각: <b style="color: #f8fafc;">{run_timestamp}</b>
                 </div>
             </div>
             <div style="border-top: 1px solid #334155; padding-top: 10px; display: flex; gap: 20px; font-size: 16px; color: #e2e8f0;">
@@ -285,13 +355,12 @@ def render():
         values="Size",
         color="Status",
         color_discrete_map={
-            "상승": "#ef4444",  # 선명한 빨간색 고정
-            "하락": "#10b981",  # 선명한 초록색 고정
+            "상승": "#ef4444",
+            "하락": "#10b981",
         },
         custom_data=["Ticker", "Return", "SubTheme", "Diff", "DiffHtml"],
     )
 
-    # 트리맵 블록 내부 텍스트 렌더링 설정
     fig.update_traces(
         texttemplate="<b>%{label}</b><br>%{customdata[1]:+.2f}%<br>%{customdata[4]}",
         textfont=dict(
@@ -305,7 +374,7 @@ def render():
 
     fig.update_layout(
         title=dict(
-            text=f"<b>오늘 시장 분석 - 테마별 당일 등락률 트리맵 ({base_date_str} 기준)</b>",
+            text=f"<b>오늘 시장 분석 - 테마별 당일 등락률 트리맵 ({effective_data_date} 기준)</b>",
             font=dict(size=24, color="#f8fafc"),
             x=0.03,
             y=0.96,
