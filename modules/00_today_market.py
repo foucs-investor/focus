@@ -124,6 +124,16 @@ def _to_float(val) -> float | None:
         return None
 
 
+def _clean_etf_name(raw_name: str | None, ticker: str) -> str:
+    """티커 대신 화면에 표시할 깔끔한 ETF명을 반환"""
+    if raw_name and isinstance(raw_name, str):
+        name = raw_name.strip()
+        # 이름이 비어있거나 원본 티커와 같으면 유효한 ETF명으로 보지 않음
+        if name and name.upper() != ticker.upper():
+            return name
+    return ticker
+
+
 def _fetch_naver_index_api(ticker: str) -> tuple[float, float] | None:
     """네이버 증권 JSON API로 KOSPI / KOSDAQ 현재가 및 등락률(%) 조회"""
     code_map = {"^KS11": "KOSPI", "^KQ11": "KOSDAQ"}
@@ -131,7 +141,6 @@ def _fetch_naver_index_api(ticker: str) -> tuple[float, float] | None:
     if not idx_code:
         return None
 
-    # 1) 실시간 폴링 엔드포인트 시도
     polling_url = f"https://polling.finance.naver.com/api/realtime/domestic/index/{idx_code}"
     try:
         resp = requests.get(polling_url, headers=HEADERS, timeout=4)
@@ -147,7 +156,6 @@ def _fetch_naver_index_api(ticker: str) -> tuple[float, float] | None:
     except Exception:
         pass
 
-    # 2) 기본 시세 엔드포인트 폴백
     basic_url = f"https://m.stock.naver.com/api/index/{idx_code}/basic"
     try:
         resp = requests.get(basic_url, headers=HEADERS, timeout=4)
@@ -164,10 +172,10 @@ def _fetch_naver_index_api(ticker: str) -> tuple[float, float] | None:
     return None
 
 
-def _fetch_naver_etfs_api(tickers: list[str]) -> dict[str, float]:
+def _fetch_naver_etfs_api(tickers: list[str]) -> tuple[dict[str, float], dict[str, str]]:
     """
-    네이버 증권 실시간 JSON API로 ETF 목록의 등락률(%)을 일괄 조회.
-    반환: {원본_티커: 등락률_퍼센트}
+    네이버 증권 실시간 JSON API로 ETF 목록의 등락률(%)과 ETF명을 일괄 조회.
+    반환: ({원본_티커: 등락률_퍼센트}, {원본_티커: ETF명})
     """
     code_to_tickers: dict[str, list[str]] = {}
     for t in tickers:
@@ -176,11 +184,11 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> dict[str, float]:
             code_to_tickers.setdefault(code, []).append(t)
 
     codes = list(code_to_tickers.keys())
-    results: dict[str, float] = {}
+    returns: dict[str, float] = {}
+    names: dict[str, str] = {}
     if not codes:
-        return results
+        return returns, names
 
-    # 30개씩 나누어 배치 요청
     chunk_size = 30
     for i in range(0, len(codes), chunk_size):
         chunk = codes[i : i + chunk_size]
@@ -197,16 +205,24 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> dict[str, float]:
                 for item in datas:
                     item_code = str(item.get("itemCode", "")).strip()
                     rate_val = _to_float(item.get("fluctuationsRatio"))
-                    if item_code in code_to_tickers and rate_val is not None:
+                    etf_name = (
+                        item.get("stockName")
+                        or item.get("itemName")
+                        or item.get("name")
+                    )
+                    if item_code in code_to_tickers:
                         for orig_ticker in code_to_tickers[item_code]:
-                            results[orig_ticker] = rate_val
+                            if rate_val is not None:
+                                returns[orig_ticker] = rate_val
+                            if etf_name:
+                                names[orig_ticker] = str(etf_name).strip()
         except Exception:
             continue
 
-    # 배치에서 누락된 종목은 개별 /basic API로 보완
     missing_codes = [
-        c for c, t_list in code_to_tickers.items()
-        if not any(t in results for t in t_list)
+        c
+        for c, t_list in code_to_tickers.items()
+        if not any(t in returns and t in names for t in t_list)
     ]
     for code in missing_codes:
         basic_url = f"https://m.stock.naver.com/api/stock/{code}/basic"
@@ -214,14 +230,22 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> dict[str, float]:
             resp = requests.get(basic_url, headers=HEADERS, timeout=4)
             resp.raise_for_status()
             data = resp.json()
-            rate_val = _to_float(data.get("fluctuationsRatio")) if isinstance(data, dict) else None
-            if rate_val is not None:
+            if isinstance(data, dict):
+                rate_val = _to_float(data.get("fluctuationsRatio"))
+                etf_name = (
+                    data.get("stockName")
+                    or data.get("itemName")
+                    or data.get("name")
+                )
                 for orig_ticker in code_to_tickers[code]:
-                    results[orig_ticker] = rate_val
+                    if orig_ticker not in returns and rate_val is not None:
+                        returns[orig_ticker] = rate_val
+                    if orig_ticker not in names and etf_name:
+                        names[orig_ticker] = str(etf_name).strip()
         except Exception:
             continue
 
-    return results
+    return returns, names
 
 
 def _get_index_quote(ticker: str) -> tuple[float, float]:
@@ -249,15 +273,23 @@ def _get_index_quote(ticker: str) -> tuple[float, float]:
     return 0.0, 0.0
 
 
-def _get_etf_returns(tickers: list[str], etf_data: pd.DataFrame) -> dict[str, float]:
-    """ETF 등락률(%) 조회 (네이버 API 우선 -> yfinance 일봉 폴백)"""
-    returns = _fetch_naver_etfs_api(tickers)
+def _get_etf_returns_and_names(
+    tickers: list[str], etf_data: pd.DataFrame, name_mapping: dict
+) -> tuple[dict[str, float], dict[str, str]]:
+    """
+    ETF 등락률(%)과 표시용 ETF명 조회:
+    - 등락률: 네이버 API 우선 -> yfinance 일봉 폴백
+    - ETF명: name_mapping 우선 -> 네이버 API 종목명 -> 폴백
+    """
+    returns, naver_names = _fetch_naver_etfs_api(tickers)
+    resolved_names: dict[str, str] = {}
 
-    # 네이버 API에서 응답이 없는 종목만 yfinance로 폴백
     for t in tickers:
-        if t in returns:
-            continue
-        if t in etf_data.columns:
+        mapped_name = name_mapping.get(t) if isinstance(name_mapping, dict) else None
+        candidate_name = mapped_name or naver_names.get(t)
+        resolved_names[t] = _clean_etf_name(candidate_name, t)
+
+        if t not in returns and t in etf_data.columns:
             series = etf_data[t].dropna()
             if len(series) >= 2:
                 prev_c = float(series.iloc[-2])
@@ -265,7 +297,7 @@ def _get_etf_returns(tickers: list[str], etf_data: pd.DataFrame) -> dict[str, fl
                 if prev_c > 0:
                     returns[t] = (curr_c - prev_c) / prev_c * 100.0
 
-    return returns
+    return returns, resolved_names
 
 
 def render():
@@ -274,7 +306,6 @@ def render():
     run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
 
     with st.spinner(f"{run_timestamp} 기준 네이버 시세 API 데이터를 가져오는 중입니다..."):
-        # 종목명 매핑 및 폴백용 데이터 확보 (ffill 없이 원본 유지)
         df_raw, name_mapping = download_etf_data(etf_tickers, period="10d")
         etf_data = df_raw.copy()
         etf_data.index = pd.to_datetime(etf_data.index)
@@ -288,7 +319,9 @@ def render():
             idx_latest_vals[ticker] = val
             idx_returns[ticker] = ret
 
-        latest_returns = _get_etf_returns(etf_tickers, etf_data)
+        latest_returns, etf_names = _get_etf_returns_and_names(
+            etf_tickers, etf_data, name_mapping or {}
+        )
 
     kospi_ret = idx_returns.get("^KS11", 0.0)
     kospi_val = idx_latest_vals.get("^KS11", 0.0)
@@ -327,7 +360,11 @@ def render():
     for ticker, ret in latest_returns.items():
         if pd.isna(ret):
             continue
-        full_name = name_mapping.get(ticker, ticker)
+        # 티커가 아니라 ETF명이 항상 우선 표시되도록 설정
+        full_name = etf_names.get(ticker) or _clean_etf_name(
+            name_mapping.get(ticker) if isinstance(name_mapping, dict) else None,
+            ticker,
+        )
         raw_theme = clean_theme_name(full_name)
         theme_name = group_theme_category(ticker, full_name, raw_theme)
 
@@ -402,17 +439,17 @@ def render():
             "상승": "#ef4444",
             "하락": "#10b981",
         },
-        custom_data=["Ticker", "Return", "SubTheme", "Diff", "DiffHtml"],
+        custom_data=["Ticker", "Return", "SubTheme", "Diff", "DiffHtml", "FullName"],
     )
 
     fig.update_traces(
-        texttemplate="<b>%{label}</b><br>%{customdata[1]:+.2f}%<br>%{customdata[4]}",
+        texttemplate="<b>%{customdata[5]}</b><br>%{customdata[1]:+.2f}%<br>%{customdata[4]}",
         textfont=dict(
             size=14,
             family="Malgun Gothic, Apple SD Gothic Neo, sans-serif",
         ),
         hovertemplate=(
-            "<b>대분류:</b> %{parent}<br><b>세부 테마:</b> %{customdata[2]}<br><b>항목명:</b> %{label}<br><b>티커:</b> %{customdata[0]}<br><b>당일 등락률:</b> %{customdata[1]:+.2f}%<br><b>기준지수 대비:</b> %{customdata[3]:+.2f}%<extra></extra>"
+            "<b>대분류:</b> %{parent}<br><b>세부 테마:</b> %{customdata[2]}<br><b>ETF명:</b> %{customdata[5]}<br><b>티커:</b> %{customdata[0]}<br><b>당일 등락률:</b> %{customdata[1]:+.2f}%<br><b>기준지수 대비:</b> %{customdata[3]:+.2f}%<extra></extra>"
         ),
     )
 
