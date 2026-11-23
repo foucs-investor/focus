@@ -1,10 +1,9 @@
 # modules/00_today_market.py
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import re
-import requests
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 import yfinance as yf
 from utils import clean_theme_name, download_etf_data, etf_tickers
@@ -17,7 +16,9 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Referer": "https://m.stock.naver.com/",
+    "Accept": "application/json, text/plain, */*",
 }
 
 
@@ -109,11 +110,13 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     return theme_name
 
 
-def _parse_num(text: str | None) -> float | None:
-    if not text:
+def _to_float(val) -> float | None:
+    if val is None:
         return None
-    cleaned = re.sub(r"[^0-9.\-]", "", str(text))
-    if not cleaned or cleaned in {"-", ".", "-."}:
+    if isinstance(val, (int, float)):
+        return float(val) if pd.notna(val) else None
+    cleaned = str(val).replace(",", "").replace("%", "").strip()
+    if not cleaned:
         return None
     try:
         return float(cleaned)
@@ -121,109 +124,109 @@ def _parse_num(text: str | None) -> float | None:
         return None
 
 
-def _fetch_naver_etf_quote(ticker: str) -> tuple[float, float] | None:
-    """
-    네이버 금융에서 종목(예: '475310.KS' -> '475310')의 현재가와 등락률(%)을 조회.
-    반환: (current_price, return_pct) 또는 실패 시 None
-    """
-    code = ticker.split(".")[0].strip()
-    if not code.isdigit():
-        return None
-
-    url = f"https://finance.naver.com/item/main.naver?code={code}"
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=4)
-        resp.raise_for_status()
-        html = resp.text
-
-        # <p class="no_today"> 내부 현재가 추출
-        no_today_match = re.search(
-            r'<p[^>]*class="[^"]*no_today[^"]*"[^>]*>(.*?)</p>',
-            html,
-            re.S,
-        )
-        curr_price = None
-        if no_today_match:
-            blind_match = re.search(
-                r'<span[^>]*class="[^"]*blind[^"]*"[^>]*>([^<]+)</span>',
-                no_today_match.group(1),
-            )
-            if blind_match:
-                curr_price = _parse_num(blind_match.group(1))
-
-        # <p class="no_exday"> 또는 전일/등락률 영역 추출
-        # 네이버 종목 페이지에서 전일가와 등락률을 함께 확인
-        prev_close = None
-        prev_match = re.search(
-            r"전일\s*<span[^>]*class=\"[^\"]*blind[^\"]*\"[^>]*>([^<]+)</span>",
-            html,
-        )
-        if prev_match:
-            prev_close = _parse_num(prev_match.group(1))
-
-        # 전일가가 있으면 (현재가 - 전일가) / 전일가로 직접 계산
-        if curr_price is not None and prev_close and prev_close > 0:
-            ret_pct = (curr_price - prev_close) / prev_close * 100.0
-            return curr_price, ret_pct
-
-        # 전일가 파싱 실패 시 no_exday의 등락률 blind 값 시도
-        no_exday_match = re.search(
-            r'<p[^>]*class="[^"]*no_exday[^"]*"[^>]*>(.*?)</p>',
-            html,
-            re.S,
-        )
-        if curr_price is not None and no_exday_match:
-            blinds = re.findall(
-                r'<span[^>]*class="[^"]*blind[^"]*"[^>]*>([^<]+)</span>',
-                no_exday_match.group(1),
-            )
-            # 보통 [전일대비금액, 부호, 등락률] 순서로 등장
-            if len(blinds) >= 3:
-                pct_val = _parse_num(blinds[2])
-                if pct_val is not None:
-                    # 하락(ico down / 감) 여부 반영
-                    is_down = bool(
-                        re.search(r'class="[^"]*ico\s+down[^"]*"|하락', no_exday_match.group(1))
-                    )
-                    if is_down and pct_val > 0:
-                        pct_val = -pct_val
-                    return curr_price, pct_val
-
-    except Exception:
-        return None
-
-    return None
-
-
-def _fetch_naver_index_quote(ticker: str) -> tuple[float, float] | None:
-    """네이버 금융에서 KOSPI(^KS11) / KOSDAQ(^KQ11) 지수 현재가 및 등락률(%) 조회"""
+def _fetch_naver_index_api(ticker: str) -> tuple[float, float] | None:
+    """네이버 증권 JSON API로 KOSPI / KOSDAQ 현재가 및 등락률(%) 조회"""
     code_map = {"^KS11": "KOSPI", "^KQ11": "KOSDAQ"}
-    sise_code = code_map.get(ticker)
-    if not sise_code:
+    idx_code = code_map.get(ticker)
+    if not idx_code:
         return None
 
-    url = f"https://finance.naver.com/sise/sise_index.naver?code={sise_code}"
+    # 1) 실시간 폴링 엔드포인트 시도
+    polling_url = f"https://polling.finance.naver.com/api/realtime/domestic/index/{idx_code}"
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=4)
+        resp = requests.get(polling_url, headers=HEADERS, timeout=4)
         resp.raise_for_status()
-        html = resp.text
-
-        val_match = re.search(r'<em[^>]*id="now_value"[^>]*>([^<]+)</em>', html)
-        rate_match = re.search(r'<span[^>]*id="rate"[^>]*>([^<]+)</span>', html)
-        curr_val = _parse_num(val_match.group(1)) if val_match else None
-        rate_val = _parse_num(rate_match.group(1)) if rate_match else None
-
-        if curr_val is not None and rate_val is not None:
-            return curr_val, rate_val
+        payload = resp.json()
+        datas = payload.get("datas") if isinstance(payload, dict) else None
+        if isinstance(datas, list) and datas:
+            item = datas[0]
+            curr_val = _to_float(item.get("closePrice"))
+            rate_val = _to_float(item.get("fluctuationsRatio"))
+            if curr_val is not None and rate_val is not None:
+                return curr_val, rate_val
     except Exception:
-        return None
+        pass
+
+    # 2) 기본 시세 엔드포인트 폴백
+    basic_url = f"https://m.stock.naver.com/api/index/{idx_code}/basic"
+    try:
+        resp = requests.get(basic_url, headers=HEADERS, timeout=4)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, dict):
+            curr_val = _to_float(data.get("closePrice"))
+            rate_val = _to_float(data.get("fluctuationsRatio"))
+            if curr_val is not None and rate_val is not None:
+                return curr_val, rate_val
+    except Exception:
+        pass
 
     return None
 
 
-def _get_index_quote_with_fallback(ticker: str) -> tuple[float, float]:
-    """지수 현재가 및 등락률(%)을 네이버 우선 -> yfinance 폴백으로 조회"""
-    naver_res = _fetch_naver_index_quote(ticker)
+def _fetch_naver_etfs_api(tickers: list[str]) -> dict[str, float]:
+    """
+    네이버 증권 실시간 JSON API로 ETF 목록의 등락률(%)을 일괄 조회.
+    반환: {원본_티커: 등락률_퍼센트}
+    """
+    code_to_tickers: dict[str, list[str]] = {}
+    for t in tickers:
+        code = t.split(".")[0].strip()
+        if code.isdigit():
+            code_to_tickers.setdefault(code, []).append(t)
+
+    codes = list(code_to_tickers.keys())
+    results: dict[str, float] = {}
+    if not codes:
+        return results
+
+    # 30개씩 나누어 배치 요청
+    chunk_size = 30
+    for i in range(0, len(codes), chunk_size):
+        chunk = codes[i : i + chunk_size]
+        url = (
+            "https://polling.finance.naver.com/api/realtime/domestic/stock/"
+            + ",".join(chunk)
+        )
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=5)
+            resp.raise_for_status()
+            payload = resp.json()
+            datas = payload.get("datas") if isinstance(payload, dict) else None
+            if isinstance(datas, list):
+                for item in datas:
+                    item_code = str(item.get("itemCode", "")).strip()
+                    rate_val = _to_float(item.get("fluctuationsRatio"))
+                    if item_code in code_to_tickers and rate_val is not None:
+                        for orig_ticker in code_to_tickers[item_code]:
+                            results[orig_ticker] = rate_val
+        except Exception:
+            continue
+
+    # 배치에서 누락된 종목은 개별 /basic API로 보완
+    missing_codes = [
+        c for c, t_list in code_to_tickers.items()
+        if not any(t in results for t in t_list)
+    ]
+    for code in missing_codes:
+        basic_url = f"https://m.stock.naver.com/api/stock/{code}/basic"
+        try:
+            resp = requests.get(basic_url, headers=HEADERS, timeout=4)
+            resp.raise_for_status()
+            data = resp.json()
+            rate_val = _to_float(data.get("fluctuationsRatio")) if isinstance(data, dict) else None
+            if rate_val is not None:
+                for orig_ticker in code_to_tickers[code]:
+                    results[orig_ticker] = rate_val
+        except Exception:
+            continue
+
+    return results
+
+
+def _get_index_quote(ticker: str) -> tuple[float, float]:
+    """지수 현재가 및 등락률(%) 조회 (네이버 API 우선 -> yfinance 폴백)"""
+    naver_res = _fetch_naver_index_api(ticker)
     if naver_res is not None:
         return naver_res
 
@@ -246,57 +249,23 @@ def _get_index_quote_with_fallback(ticker: str) -> tuple[float, float]:
     return 0.0, 0.0
 
 
-def _get_etf_return_with_fallback(
-    ticker: str, etf_data: pd.DataFrame, now_kst: datetime
-) -> float | None:
-    """
-    ETF 당일 등락률(%) 계산:
-    1) 네이버 금융 현재가/전일가 기준 우선 계산
-    2) 실패 시 yfinance 일봉/분봉 기반(ffill 없이 종목별 유효 종가만 사용) 계산
-    """
-    naver_res = _fetch_naver_etf_quote(ticker)
-    if naver_res is not None:
-        return naver_res[1]
+def _get_etf_returns(tickers: list[str], etf_data: pd.DataFrame) -> dict[str, float]:
+    """ETF 등락률(%) 조회 (네이버 API 우선 -> yfinance 일봉 폴백)"""
+    returns = _fetch_naver_etfs_api(tickers)
 
-    if ticker not in etf_data.columns:
-        return None
+    # 네이버 API에서 응답이 없는 종목만 yfinance로 폴백
+    for t in tickers:
+        if t in returns:
+            continue
+        if t in etf_data.columns:
+            series = etf_data[t].dropna()
+            if len(series) >= 2:
+                prev_c = float(series.iloc[-2])
+                curr_c = float(series.iloc[-1])
+                if prev_c > 0:
+                    returns[t] = (curr_c - prev_c) / prev_c * 100.0
 
-    series = etf_data[ticker].dropna()
-    if len(series) < 2:
-        return None
-
-    today_str = now_kst.strftime("%Y-%m-%d")
-    last_ts = pd.Timestamp(series.index[-1])
-    if last_ts.tzinfo is None:
-        last_ts_kst = last_ts.tz_localize("UTC").tz_convert(KST)
-    else:
-        last_ts_kst = last_ts.tz_convert(KST)
-    last_date_str = last_ts_kst.strftime("%Y-%m-%d")
-
-    # 오늘 날짜 봉이 이미 존재하는 경우 vs 전일 종가만 있는 경우
-    if last_date_str == today_str:
-        prev_close = float(series.iloc[-2])
-        curr_price = float(series.iloc[-1])
-    else:
-        prev_close = float(series.iloc[-1])
-        curr_price = prev_close
-
-    # 장중에는 yfinance fast_info / 1m 최신 체결가가 있으면 반영하되,
-    # 직전 종가 대비 과도한 이상치(예: ±30% 초과)는 방어
-    try:
-        fi = yf.Ticker(ticker).fast_info
-        last_p = getattr(fi, "last_price", None)
-        if last_p and float(last_p) > 0 and prev_close > 0:
-            candidate = float(last_p)
-            pct = (candidate - prev_close) / prev_close * 100.0
-            if -30.0 <= pct <= 30.0:
-                return pct
-    except Exception:
-        pass
-
-    if prev_close > 0:
-        return (curr_price - prev_close) / prev_close * 100.0
-    return None
+    return returns
 
 
 def render():
@@ -304,8 +273,8 @@ def render():
     run_date_str = now.strftime("%Y-%m-%d")
     run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
 
-    with st.spinner(f"{run_timestamp} 기준 최신 시장 및 ETF 시세 데이터를 가져오는 중입니다..."):
-        # ffll()/bfill()을 제거해 종목별 날짜/가격 왜곡 방지
+    with st.spinner(f"{run_timestamp} 기준 네이버 시세 API 데이터를 가져오는 중입니다..."):
+        # 종목명 매핑 및 폴백용 데이터 확보 (ffill 없이 원본 유지)
         df_raw, name_mapping = download_etf_data(etf_tickers, period="10d")
         etf_data = df_raw.copy()
         etf_data.index = pd.to_datetime(etf_data.index)
@@ -315,15 +284,11 @@ def render():
         idx_latest_vals: dict[str, float] = {}
 
         for ticker in index_tickers:
-            val, ret = _get_index_quote_with_fallback(ticker)
+            val, ret = _get_index_quote(ticker)
             idx_latest_vals[ticker] = val
             idx_returns[ticker] = ret
 
-        latest_returns: dict[str, float] = {}
-        for ticker in etf_tickers:
-            ret = _get_etf_return_with_fallback(ticker, etf_data, now)
-            if ret is not None and pd.notna(ret):
-                latest_returns[ticker] = float(ret)
+        latest_returns = _get_etf_returns(etf_tickers, etf_data)
 
     kospi_ret = idx_returns.get("^KS11", 0.0)
     kospi_val = idx_latest_vals.get("^KS11", 0.0)
