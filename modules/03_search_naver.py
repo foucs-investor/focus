@@ -531,33 +531,45 @@ def render():
             )
         )
 
-    col_opt1, col_opt2 = st.columns([2.5, 1.5])
+    col_opt1, col_opt2, col_opt3 = st.columns([1.8, 1.8, 1.2])
     with col_opt1:
+        include_words_input = st.text_input(
+            "✅ 포함할 단어 (쉼표로 구분, 입력 시 해당 단어 포함 글만 추출)",
+            placeholder="예: 실적, 수주, 수출, 공시, 리포트",
+            help="입력한 단어 중 하나라도 포함된 글만 필터링합니다. 비워두면 모든 글을 대상으로 합니다.",
+        )
+    with col_opt2:
         exclude_words_input = st.text_input(
             "🚫 제외할 단어 (쉼표로 구분하여 여러 개 입력 가능)",
             placeholder="예: 채용, 후기, 이벤트, 할인, 부고",
         )
-    with col_opt2:
+    with col_opt3:
         manual_ticker = st.text_input(
             "📈 종목코드 직접 지정 (선택)",
             placeholder="예: 259960 또는 259960.KS",
             help="기업명 자동 검색이 안 될 때 6자리 종목코드나 .KS/.KQ 티커를 직접 입력하세요.",
         )
 
-    col_chk1, col_chk2, col_chk3 = st.columns([1.2, 1.4, 1.4])
+    col_chk1, col_chk2, col_chk3, col_chk4 = st.columns([1.1, 1.1, 1.2, 1.2])
     with col_chk1:
+        include_in_desc = st.checkbox(
+            "본문 요약에도 포함 단어 적용",
+            value=False,
+            help="체크 시 제목뿐 아니라 본문 요약(description)에 포함 단어가 들어간 글도 함께 추출합니다.",
+        )
+    with col_chk2:
         exclude_in_desc = st.checkbox(
             "본문 요약에도 제외 단어 적용",
             value=False,
             help="체크 시 제목뿐 아니라 네이버 검색 결과의 본문 요약(description)에 제외 단어가 포함된 글도 제외합니다.",
         )
-    with col_chk2:
+    with col_chk3:
         only_latest_per_blog = st.checkbox(
             "동일 블로그 최신글 1건만 표시",
             value=True,
             help="기본값으로 활성화되어 있으며, 같은 블로그에서 작성된 글 중 가장 최신 글 1건만 수집 결과 목록에 남깁니다.",
         )
-    with col_chk3:
+    with col_chk4:
         only_single_mention = st.checkbox(
             "복수 종목 나열 제목 일부 제외",
             value=False,
@@ -646,6 +658,23 @@ def render():
             df["clean_title"].apply(lambda t: _title_contains_keyword(t, clean_kw))
         ]
 
+        # 포함 단어 필터링 (입력된 단어 중 하나라도 포함된 글만 유지)
+        include_list = [
+            w.strip() for w in include_words_input.split(",") if w.strip()
+        ]
+        if include_list:
+            include_pattern = "|".join(re.escape(w) for w in include_list)
+            title_match = df["clean_title"].str.contains(
+                include_pattern, case=False, na=False, regex=True
+            )
+            if include_in_desc:
+                desc_match = df["clean_desc"].str.contains(
+                    include_pattern, case=False, na=False, regex=True
+                )
+                df = df[title_match | desc_match]
+            else:
+                df = df[title_match]
+
         # 제외 단어 필터링
         exclude_list = [
             w.strip() for w in exclude_words_input.split(",") if w.strip()
@@ -673,7 +702,7 @@ def render():
 
         if df.empty:
             st.warning(
-                f"조회 기간(`{start_str}` ~ `{end_str}`) 내 제목에 검색 키워드가 포함된 조건 일치 결과가 없습니다."
+                f"조회 기간(`{start_str}` ~ `{end_str}`) 내 검색 조건에 일치하는 결과가 없습니다."
             )
             return
 
@@ -702,6 +731,8 @@ def render():
             )
 
         filter_notes = [f"기간: {start_str}~{end_str}", "제목 키워드 일치"]
+        if include_list:
+            filter_notes.append(f"포함 단어: {', '.join(include_list)}")
         if exclude_list:
             filter_notes.append(f"제외 단어: {', '.join(exclude_list)}")
         if only_latest_per_blog:
