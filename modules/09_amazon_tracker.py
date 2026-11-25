@@ -10,6 +10,9 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+# 사이드바 라디오 버튼에 표시될 메뉴명
+MENU_NAME = "아마존 트레킹"
+
 # 데이터 저장 경로 (로컬 CSV)
 DATA_DIR = "data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "amazon_watchlist.csv")
