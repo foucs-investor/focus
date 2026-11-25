@@ -2,8 +2,6 @@ import json
 import os
 import random
 import re
-import subprocess
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -99,7 +97,7 @@ def _parse_json_ld(soup: BeautifulSoup) -> dict:
 
 
 def _playwright_worker(asin: str) -> dict:
-    """실제 크롬 브라우저(Playwright)로 미국 배송지 기준 아마존 페이지 파싱"""
+    """메모리 절감 옵션으로 Chromium을 띄워 아마존 페이지 파싱"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -107,13 +105,9 @@ def _playwright_worker(asin: str) -> dict:
             "error": "playwright 미설치: requirements.txt에 playwright 추가 후 재배포 필요"
         }
 
-    subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
-        check=False,
-    )
-
     url = f"https://www.amazon.com/dp/{asin}?language=en_US&currency=USD"
 
+    browser = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(
@@ -122,6 +116,9 @@ def _playwright_worker(asin: str) -> dict:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--single-process",
+                    "--no-zygote",
                 ],
             )
             context = browser.new_context(
@@ -132,15 +129,27 @@ def _playwright_worker(asin: str) -> dict:
                 ),
                 locale="en-US",
                 timezone_id="America/New_York",
-                viewport={"width": 1366, "height": 900},
+                viewport={"width": 1280, "height": 720},
             )
             page = context.new_page()
-            page.goto(url, wait_until="domcontentloaded", timeout=35000)
-            page.wait_for_timeout(3000)
+            page.set_default_timeout(25000)
+
+            # 이미지/미디어/폰트 로드를 차단해 메모리 및 로딩 시간 절감
+            def _block_heavy(route):
+                if route.request.resource_type in {"image", "media", "font"}:
+                    route.abort()
+                else:
+                    route.continue_()
+
+            page.route("**/*", _block_heavy)
+
+            page.goto(url, wait_until="domcontentloaded", timeout=25000)
+            page.wait_for_timeout(2000)
 
             html = page.content()
             title = page.title()
             browser.close()
+            browser = None
 
         soup = BeautifulSoup(html, "html.parser")
         page_text = soup.get_text(" ", strip=True)
@@ -190,8 +199,14 @@ def _playwright_worker(asin: str) -> dict:
             for sel in rev_selectors:
                 el = soup.select_one(sel)
                 if el:
-                    m = re.search(r"([\d,]+)\s*(?:global\s*)?ratings?", el.get_text(), re.I)
-                    digits = m.group(1).replace(",", "") if m else re.sub(r"[^\d]", "", el.get_text())
+                    m = re.search(
+                        r"([\d,]+)\s*(?:global\s*)?ratings?", el.get_text(), re.I
+                    )
+                    digits = (
+                        m.group(1).replace(",", "")
+                        if m
+                        else re.sub(r"[^\d]", "", el.get_text())
+                    )
                     if digits:
                         review_count = int(digits)
                         break
@@ -239,9 +254,7 @@ def _playwright_worker(asin: str) -> dict:
                 stock_status = "Low Stock"
 
         if price is None and review_count is None and bsr_main is None:
-            return {
-                "error": f"요소 미검출 [제목: {title} | 본문: {snippet}]"
-            }
+            return {"error": f"요소 미검출 [제목: {title} | 본문: {snippet}]"}
 
         return {
             "price_usd": price,
@@ -255,6 +268,12 @@ def _playwright_worker(asin: str) -> dict:
 
     except Exception as e:
         return {"error": str(e)}
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def fetch_amazon_product(asin: str) -> dict:
