@@ -10,10 +10,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
-# 사이드바 라디오 버튼에 표시될 메뉴명
+# app.py 자동 모듈 로더가 인식하는 필수 메뉴명 변수
 MENU_NAME = "아마존 트레킹"
 
-# 데이터 저장 경로 (로컬 CSV)
+# 데이터 저장 경로 (프로젝트 루트의 data 폴더)
 DATA_DIR = "data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "amazon_watchlist.csv")
 HISTORY_FILE = os.path.join(DATA_DIR, "amazon_tracking_history.csv")
@@ -134,8 +134,8 @@ def fetch_amazon_product(asin: str) -> dict:
         return {"error": str(e)}
 
 
-def render_amazon_tracking():
-    """메인 대시보드에서 호출할 '아마존 트레킹' 메뉴 UI"""
+# app.py 자동 모듈 로더가 호출하는 필수 진입 함수명: render()
+def render():
     init_storage()
     st.header("📦 아마존 트레킹 (Amazon Product Tracker)")
     st.caption("기업별 미국 아마존 주력 SKU의 판매 순위(BSR), 누적 리뷰 증가 추이, 가격 및 품절 여부를 누적 추적합니다.")
@@ -237,11 +237,10 @@ def render_amazon_tracking():
                     }
                 )
             progress.progress((idx + 1) / len(target_watch))
-            time.sleep(random.uniform(1.5, 3.0))  # 아마존 차단 방지 딜레이
+            time.sleep(random.uniform(1.5, 3.0))
 
         if new_records:
             df_new = pd.DataFrame(new_records)
-            # 같은 날짜 + 같은 ASIN 데이터는 최신 값으로 덮어쓰기
             df_hist = df_hist[
                 ~((df_hist["date"] == today_str) & (df_hist["asin"].isin(df_new["asin"])))
             ]
@@ -262,7 +261,6 @@ def render_amazon_tracking():
         return
 
     filtered_hist = filtered_hist.sort_values(["asin", "date"])
-    # 전일(직전 수집일) 대비 신규 리뷰 증가분 계산
     filtered_hist["new_reviews"] = filtered_hist.groupby("asin")["review_count"].diff().fillna(0)
 
     # 최신 스냅샷 테이블
@@ -295,14 +293,14 @@ def render_amazon_tracking():
     if len(prod_df) > 0:
         fig = make_subplots(specs=[[{"secondary_y": True}]])
 
-        # 좌축: 누적 리뷰 수 (우상향 추세 확인)
+        # 좌축: 누적 리뷰 수 (상승/강조 레드)
         fig.add_trace(
             go.Scatter(
                 x=prod_df["date"],
                 y=prod_df["review_count"],
                 name="누적 리뷰 수 (좌)",
                 mode="lines+markers",
-                line=dict(color="#FF4B4B", width=2.5),  # 상승/강조 레드 계열
+                line=dict(color="#FF4B4B", width=2.5),
             ),
             secondary_y=False,
         )
@@ -329,12 +327,10 @@ def render_amazon_tracking():
             hovermode="x unified",
         )
         fig.update_yaxes(title_text="누적 리뷰 수 (개)", secondary_y=False)
-        # BSR은 1위에 가까울수록(숫자가 작을수록) 좋은 것이므로 역축(reversed) 처리
         fig.update_yaxes(title_text="BSR 판매 순위 (상단일수록 고순위)", autorange="reversed", secondary_y=True)
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # 수동/과거 데이터 보정용 CSV 다운로드
         csv_data = prod_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button(
             label="📥 선택 제품 누적 데이터 CSV 다운로드",
