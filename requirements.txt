@@ -12,3 +12,4 @@ beautifulsoup4
 OpenDartReader
 pykrx
 reportlab
+requests
