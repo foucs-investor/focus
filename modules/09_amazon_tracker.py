@@ -9,6 +9,13 @@ from bs4 import BeautifulSoup
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
+import subprocess
+import sys
+
+subprocess.run(
+    [sys.executable, "-m", "playwright", "install", "chromium"],
+    check=False,
+)
 
 MENU_NAME = "아마존 트레킹"
 
