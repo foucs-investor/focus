@@ -2,6 +2,8 @@ import json
 import os
 import random
 import re
+import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -17,6 +19,7 @@ MENU_NAME = "아마존 트레킹"
 DATA_DIR = "data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "amazon_watchlist.csv")
 HISTORY_FILE = os.path.join(DATA_DIR, "amazon_tracking_history.csv")
+BROWSER_CACHE_DIR = "/home/appuser/.cache/ms-playwright"
 
 
 def init_storage():
@@ -53,6 +56,51 @@ def extract_asin(input_str: str) -> str:
     if re.fullmatch(r"[A-Z0-9]{10}", input_str):
         return input_str
     return ""
+
+
+def _ensure_chromium_installed() -> str | None:
+    """Playwright Chromium 바이너리가 없으면 설치하고, 설치 실패 시 오류 메시지 반환"""
+    env = os.environ.copy()
+    if os.name != "nt":
+        os.makedirs(BROWSER_CACHE_DIR, exist_ok=True)
+        env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_CACHE_DIR
+
+    # 캐시 디렉터리에 chromium 또는 headless_shell 폴더가 있는지 확인
+    has_browser = False
+    if os.name == "nt":
+        win_cache = os.path.join(
+            os.environ.get("LOCALAPPDATA", ""), "ms-playwright"
+        )
+        if os.path.exists(win_cache):
+            has_browser = any(
+                name.startswith(("chromium-", "chromium_headless_shell-"))
+                for name in os.listdir(win_cache)
+            )
+    else:
+        if os.path.exists(BROWSER_CACHE_DIR):
+            has_browser = any(
+                name.startswith(("chromium-", "chromium_headless_shell-"))
+                for name in os.listdir(BROWSER_CACHE_DIR)
+            )
+
+    if has_browser:
+        return None
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=240,
+            check=False,
+        )
+        if proc.returncode != 0:
+            err_tail = (proc.stderr or proc.stdout or "").strip()[-300:]
+            return f"Chromium 설치 실패(코드 {proc.returncode}): {err_tail}"
+        return None
+    except Exception as e:
+        return f"Chromium 설치 중 예외 발생: {e}"
 
 
 def _parse_json_ld(soup: BeautifulSoup) -> dict:
@@ -105,6 +153,13 @@ def _playwright_worker(asin: str) -> dict:
             "error": "playwright 미설치: requirements.txt에 playwright 추가 후 재배포 필요"
         }
 
+    install_err = _ensure_chromium_installed()
+    if install_err:
+        return {"error": install_err}
+
+    if os.name != "nt":
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_CACHE_DIR
+
     url = f"https://www.amazon.com/dp/{asin}?language=en_US&currency=USD"
 
     browser = None
@@ -134,7 +189,6 @@ def _playwright_worker(asin: str) -> dict:
             page = context.new_page()
             page.set_default_timeout(25000)
 
-            # 이미지/미디어/폰트 로드를 차단해 메모리 및 로딩 시간 절감
             def _block_heavy(route):
                 if route.request.resource_type in {"image", "media", "font"}:
                     route.abort()
@@ -166,7 +220,6 @@ def _playwright_worker(asin: str) -> dict:
 
         ld_data = _parse_json_ld(soup)
 
-        # 1. 판매 가격 (USD)
         price = ld_data["price"]
         if price is None:
             price_selectors = [
@@ -188,7 +241,6 @@ def _playwright_worker(asin: str) -> dict:
                 if price is not None:
                     break
 
-        # 2. 누적 리뷰 수
         review_count = ld_data["review_count"]
         if review_count is None:
             rev_selectors = [
@@ -216,7 +268,6 @@ def _playwright_worker(asin: str) -> dict:
             if m_text:
                 review_count = int(m_text.group(1).replace(",", ""))
 
-        # 3. 평점
         rating = ld_data["rating"]
         if rating is None:
             rat_el = soup.select_one("#acrPopover span.a-icon-alt") or soup.select_one(
@@ -227,7 +278,6 @@ def _playwright_worker(asin: str) -> dict:
                 if rat_match:
                     rating = float(rat_match.group(1))
 
-        # 4. 베스트셀러 순위 (BSR - 대분류 / 소분류)
         bsr_main, bsr_sub = None, None
         detail_section = (
             soup.select_one("#detailBulletsWrapper_feature_div")
@@ -243,7 +293,6 @@ def _playwright_worker(asin: str) -> dict:
         if len(bsr_matches) >= 2:
             bsr_sub = int(bsr_matches[1].replace(",", ""))
 
-        # 5. 재고 상태
         stock_status = "In Stock"
         avail_el = soup.select_one("#availability")
         if avail_el:
