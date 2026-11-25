@@ -13,3 +13,4 @@ OpenDartReader
 pykrx
 reportlab
 requests
+playwright
