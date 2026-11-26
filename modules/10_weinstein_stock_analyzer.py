@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
 스탠 와인스타인 4단계 주식 분석기
-- 기존 Plotly 차트 방식 유지
+- 기존 Plotly 차트 방식 유지 + Stage별 밝은 색 음영 구분
 - 차트 및 다운로드 이미지는 최근 1년치 표시 (이동평균/단계/RS는 전체 기간 기준으로 산출)
 - 차트 하단에 4단 요약 패널(단계별 구간 및 근거 / 매수·매도 전략 / 손절 기준 / 종합 결론) 추가
 - 전체 결과 PNG 이미지 및 CSV 다운로드 지원
 """
 
-from datetime import date, timedelta
+from datetime import timedelta
 import io
 import os
 import re
@@ -63,120 +63,120 @@ def _apply_bright_style():
     """전체 화면과 4단 요약 패널을 밝은 톤으로 표시합니다."""
     st.markdown(
         """
-        <style>
-            .stApp {
-                background-color: #F8FAFC !important;
-                color: #1E293B !important;
-            }
-            [data-testid="stSidebar"] {
-                background-color: #FFFFFF !important;
-                border-right: 1px solid #E2E8F0 !important;
-            }
-            [data-testid="stSidebar"] * {
-                color: #1E293B !important;
-            }
-            .stMarkdown, .stText, p, span, label, h1, h2, h3, h4 {
-                color: #1E293B !important;
-            }
-            .stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
-                background-color: #FFFFFF !important;
-                color: #1E293B !important;
-                border-color: #CBD5E1 !important;
-            }
-            .summary-grid {
-                display: grid;
-                grid-template-columns: 1.35fr 1.25fr 0.85fr 1.15fr;
-                gap: 10px;
-                margin-top: 8px;
-                margin-bottom: 16px;
-            }
-            @media (max-width: 1100px) {
-                .summary-grid {
-                    grid-template-columns: 1fr 1fr;
-                }
-            }
-            @media (max-width: 650px) {
-                .summary-grid {
-                    grid-template-columns: 1fr;
-                }
-            }
-            .summary-card {
-                background-color: #FFFFFF;
-                border: 1.5px solid #1E3A8A;
-                border-radius: 6px;
-                overflow: hidden;
-                box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
-            }
-            .summary-card-header {
-                background-color: #1E3A8A;
-                color: #FFFFFF !important;
-                font-weight: 700;
-                font-size: 0.98rem;
-                padding: 7px 12px;
-            }
-            .summary-card-body {
-                padding: 10px 12px;
-                font-size: 0.85rem;
-                line-height: 1.45;
-                color: #1E293B !important;
-            }
-            .stage-row {
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 3px 6px;
-                border-radius: 4px;
-                margin-bottom: 4px;
-            }
-            .stage-pill {
-                display: inline-block;
-                min-width: 56px;
-                text-align: center;
-                color: #FFFFFF !important;
-                font-weight: 700;
-                font-size: 0.76rem;
-                padding: 2px 6px;
-                border-radius: 3px;
-            }
-            .strat-badge {
-                display: inline-block;
-                color: #FFFFFF !important;
-                font-weight: 700;
-                font-size: 0.8rem;
-                padding: 2px 8px;
-                border-radius: 3px;
-                margin-bottom: 4px;
-            }
-            .strat-box-buy {
-                background-color: #F0FDF4;
-                border-radius: 4px;
-                padding: 6px 8px;
-                margin-bottom: 8px;
-            }
-            .strat-box-sell {
-                background-color: #FEF2F2;
-                border-radius: 4px;
-                padding: 6px 8px;
-            }
-            .stop-center {
-                height: 100%;
-                min-height: 140px;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                justify-content: center;
-                text-align: center;
-                font-weight: 700;
-                color: #1E293B !important;
-            }
-            .conclusion-title {
-                color: #15803D !important;
-                font-weight: 800;
-                font-size: 1.02rem;
-                margin-bottom: 6px;
-            }
-        </style>
-        """,
+<style>
+.stApp {
+    background-color: #F8FAFC !important;
+    color: #1E293B !important;
+}
+[data-testid="stSidebar"] {
+    background-color: #FFFFFF !important;
+    border-right: 1px solid #E2E8F0 !important;
+}
+[data-testid="stSidebar"] * {
+    color: #1E293B !important;
+}
+.stMarkdown, .stText, p, span, label, h1, h2, h3, h4 {
+    color: #1E293B !important;
+}
+.stTextArea textarea, .stSelectbox div[data-baseweb="select"] > div {
+    background-color: #FFFFFF !important;
+    color: #1E293B !important;
+    border-color: #CBD5E1 !important;
+}
+.summary-grid {
+    display: grid;
+    grid-template-columns: 1.35fr 1.25fr 0.85fr 1.15fr;
+    gap: 10px;
+    margin-top: 8px;
+    margin-bottom: 16px;
+}
+@media (max-width: 1100px) {
+    .summary-grid {
+        grid-template-columns: 1fr 1fr;
+    }
+}
+@media (max-width: 650px) {
+    .summary-grid {
+        grid-template-columns: 1fr;
+    }
+}
+.summary-card {
+    background-color: #FFFFFF;
+    border: 1.5px solid #1E3A8A;
+    border-radius: 6px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+}
+.summary-card-header {
+    background-color: #1E3A8A;
+    color: #FFFFFF !important;
+    font-weight: 700;
+    font-size: 0.98rem;
+    padding: 7px 12px;
+}
+.summary-card-body {
+    padding: 10px 12px;
+    font-size: 0.85rem;
+    line-height: 1.45;
+    color: #1E293B !important;
+}
+.stage-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+}
+.stage-pill {
+    display: inline-block;
+    min-width: 56px;
+    text-align: center;
+    color: #FFFFFF !important;
+    font-weight: 700;
+    font-size: 0.76rem;
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+.strat-badge {
+    display: inline-block;
+    color: #FFFFFF !important;
+    font-weight: 700;
+    font-size: 0.8rem;
+    padding: 2px 8px;
+    border-radius: 3px;
+    margin-bottom: 4px;
+}
+.strat-box-buy {
+    background-color: #F0FDF4;
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 8px;
+}
+.strat-box-sell {
+    background-color: #FEF2F2;
+    border-radius: 4px;
+    padding: 6px 8px;
+}
+.stop-center {
+    height: 100%;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-weight: 700;
+    color: #1E293B !important;
+}
+.conclusion-title {
+    color: #15803D !important;
+    font-weight: 800;
+    font-size: 1.02rem;
+    margin-bottom: 6px;
+}
+</style>
+""",
         unsafe_allow_html=True,
     )
 
@@ -256,35 +256,40 @@ def classify_stages(df):
     return stage
 
 
-STAGE_COLORS = {
-    "Stage 1": "rgba(55, 125, 235, 0.13)",
-    "Stage 2": "rgba(70, 190, 85, 0.15)",
-    "Stage 3": "rgba(245, 185, 45, 0.17)",
-    "Stage 4": "rgba(225, 65, 65, 0.14)",
+# 차트 구간별 밝은 음영 색상 (Plotly & Matplotlib 공용)
+STAGE_BRIGHT_COLORS = {
+    "Stage 1": "rgba(96, 165, 250, 0.24)",   # 밝은 파랑
+    "Stage 2": "rgba(74, 222, 128, 0.26)",   # 밝은 초록
+    "Stage 3": "rgba(250, 204, 21, 0.28)",   # 밝은 노랑
+    "Stage 4": "rgba(248, 113, 113, 0.25)",  # 밝은 빨강
 }
 
 STAGE_STYLE = {
     "Stage 1": {
         "pill_bg": "#2563EB",
         "row_bg": "#EFF6FF",
+        "mpl_bg": "#DBEAFE",
         "desc": "50일선 횡보, 바닥 형성",
         "redesc": "저점권 횡보",
     },
     "Stage 2": {
         "pill_bg": "#16A34A",
         "row_bg": "#F0FDF4",
+        "mpl_bg": "#DCFCE7",
         "desc": "50일선 상승, 200일선 돌파",
         "redesc": "50일선 상승, 200일선 돌파",
     },
     "Stage 3": {
         "pill_bg": "#CA8A04",
         "row_bg": "#FEFCE8",
+        "mpl_bg": "#FEF9C3",
         "desc": "50일선 상승 시도, 200일선 접근",
         "redesc": "50일선 상승 시도, 200일선 접근",
     },
     "Stage 4": {
         "pill_bg": "#DC2626",
         "row_bg": "#FEF2F2",
+        "mpl_bg": "#FEE2E2",
         "desc": "고점·저점 하락, 200일선 하락",
         "redesc": "50일선 하락, 재하락",
     },
@@ -318,42 +323,6 @@ def slice_recent_1y(data):
     return sliced if not sliced.empty else data
 
 
-def add_stage_shading(fig, df):
-    stage = df["Stage"]
-    if stage.empty:
-        return
-    start = stage.index[0]
-    current = stage.iloc[0]
-    for i in range(1, len(stage)):
-        if stage.iloc[i] != current:
-            end = stage.index[i]
-            color = STAGE_COLORS.get(current)
-            if color:
-                fig.add_vrect(
-                    x0=start,
-                    x1=end,
-                    fillcolor=color,
-                    opacity=1,
-                    line_width=0,
-                    layer="below",
-                    row=1,
-                    col=1,
-                )
-            start, current = end, stage.iloc[i]
-    color = STAGE_COLORS.get(current)
-    if color:
-        fig.add_vrect(
-            x0=start,
-            x1=stage.index[-1],
-            fillcolor=color,
-            opacity=1,
-            line_width=0,
-            layer="below",
-            row=1,
-            col=1,
-        )
-
-
 def _get_segments(stage_series):
     if stage_series.empty:
         return []
@@ -367,6 +336,43 @@ def _get_segments(stage_series):
             curr = stage_series.iloc[i]
     segs.append((start, stage_series.index[-1], curr))
     return segs
+
+
+def add_stage_shading(fig, df):
+    """Plotly 차트의 가격/거래량/RS 패널에 Stage별 밝은 음영을 추가합니다."""
+    for dt0, dt1, stg in _get_segments(df["Stage"]):
+        color = STAGE_BRIGHT_COLORS.get(stg)
+        if color:
+            fig.add_vrect(
+                x0=dt0,
+                x1=dt1,
+                fillcolor=color,
+                opacity=1,
+                line_width=0,
+                layer="below",
+                row=1,
+                col=1,
+            )
+            fig.add_vrect(
+                x0=dt0,
+                x1=dt1,
+                fillcolor=color,
+                opacity=0.75,
+                line_width=0,
+                layer="below",
+                row=2,
+                col=1,
+            )
+            fig.add_vrect(
+                x0=dt0,
+                x1=dt1,
+                fillcolor=color,
+                opacity=0.65,
+                line_width=0,
+                layer="below",
+                row=3,
+                col=1,
+            )
 
 
 def build_chart(data, company_name, code):
@@ -559,63 +565,59 @@ def make_summary_panel_data(data, summary):
 
 
 def render_summary_panel_html(panel):
-    """첨부 이미지의 4단 요약 패널 HTML을 생성합니다."""
-    rows_html = []
-    for item in panel["stage_items"]:
-        rows_html.append(
-            f"""
-            <div class="stage-row" style="background-color:{item['row_bg']};">
-                <span class="stage-pill" style="background-color:{item['pill_bg']};">{item['stage']}</span>
-                <span>{item['period']} | {item['desc']}</span>
-            </div>
-            """
-        )
+    """들여쓰기 공백 없이 HTML 4단 요약 패널을 생성합니다."""
+    rows_html = "".join(
+        f'<div class="stage-row" style="background-color:{item["row_bg"]};">'
+        f'<span class="stage-pill" style="background-color:{item["pill_bg"]};">{item["stage"]}</span>'
+        f'<span>{item["period"]} | {item["desc"]}</span>'
+        f"</div>"
+        for item in panel["stage_items"]
+    )
+    stop_html = panel["stop_text"].replace("\n", "<br>")
 
-    return f"""
-    <div class="summary-grid">
-        <div class="summary-card">
-            <div class="summary-card-header">단계별 구간 및 근거</div>
-            <div class="summary-card-body">
-                {''.join(rows_html)}
-            </div>
-        </div>
-        <div class="summary-card">
-            <div class="summary-card-header">매수 / 매도 전략</div>
-            <div class="summary-card-body">
-                <div class="strat-box-buy">
-                    <span class="strat-badge" style="background-color:#16A34A;">매수 지점</span><br>
-                    <span style="color:#15803D; font-weight:700;">✔</span> {panel['buy1']}<br>
-                    <span style="color:#15803D; font-weight:700;">✔</span> {panel['buy2']}
-                </div>
-                <div class="strat-box-sell">
-                    <span class="strat-badge" style="background-color:#DC2626;">매도 지점</span><br>
-                    <span style="color:#DC2626; font-weight:700;">✔</span> {panel['sell1']}<br>
-                    <span style="color:#DC2626; font-weight:700;">✔</span> {panel['sell2']}
-                </div>
-            </div>
-        </div>
-        <div class="summary-card">
-            <div class="summary-card-header">손절 기준</div>
-            <div class="summary-card-body">
-                <div class="stop-center">
-                    <div style="font-size:1.5rem; margin-bottom:4px;">⚠️</div>
-                    <div>{panel['stop_text'].replace(chr(10), '<br>')}</div>
-                </div>
-            </div>
-        </div>
-        <div class="summary-card">
-            <div class="summary-card-header">종합 결론</div>
-            <div class="summary-card-body">
-                <div class="conclusion-title">✔ {panel['conclusion_title']}</div>
-                <div>{panel['conclusion_body']}</div>
-            </div>
-        </div>
-    </div>
-    """
+    return (
+        f'<div class="summary-grid">'
+        f'<div class="summary-card">'
+        f'<div class="summary-card-header">단계별 구간 및 근거</div>'
+        f'<div class="summary-card-body">{rows_html}</div>'
+        f"</div>"
+        f'<div class="summary-card">'
+        f'<div class="summary-card-header">매수 / 매도 전략</div>'
+        f'<div class="summary-card-body">'
+        f'<div class="strat-box-buy">'
+        f'<span class="strat-badge" style="background-color:#16A34A;">매수 지점</span><br>'
+        f'<span style="color:#15803D; font-weight:700;">✔</span> {panel["buy1"]}<br>'
+        f'<span style="color:#15803D; font-weight:700;">✔</span> {panel["buy2"]}'
+        f"</div>"
+        f'<div class="strat-box-sell">'
+        f'<span class="strat-badge" style="background-color:#DC2626;">매도 지점</span><br>'
+        f'<span style="color:#DC2626; font-weight:700;">✔</span> {panel["sell1"]}<br>'
+        f'<span style="color:#DC2626; font-weight:700;">✔</span> {panel["sell2"]}'
+        f"</div>"
+        f"</div>"
+        f"</div>"
+        f'<div class="summary-card">'
+        f'<div class="summary-card-header">손절 기준</div>'
+        f'<div class="summary-card-body">'
+        f'<div class="stop-center">'
+        f'<div style="font-size:1.5rem; margin-bottom:4px;">⚠️</div>'
+        f"<div>{stop_html}</div>"
+        f"</div>"
+        f"</div>"
+        f"</div>"
+        f'<div class="summary-card">'
+        f'<div class="summary-card-header">종합 결론</div>'
+        f'<div class="summary-card-body">'
+        f'<div class="conclusion-title">✔ {panel["conclusion_title"]}</div>'
+        f'<div>{panel["conclusion_body"]}</div>'
+        f"</div>"
+        f"</div>"
+        f"</div>"
+    )
 
 
 def build_full_download_image(data, company_name, code, panel):
-    """최근 1년치 차트 + 첨부 4단 요약 패널을 합친 다운로드용 PNG 이미지를 생성합니다."""
+    """최근 1년치 차트(Stage별 밝은 음영) + 4단 요약 패널을 합친 PNG를 생성합니다."""
     view_data = slice_recent_1y(data)
     fig = plt.figure(figsize=(18, 12.2), dpi=150, facecolor="#FFFFFF")
 
@@ -654,7 +656,10 @@ def build_full_download_image(data, company_name, code, panel):
 
     for dt0, dt1, stg in _get_segments(view_data["Stage"]):
         if stg in STAGE_STYLE:
-            ax1.axvspan(dt0, dt1, color=STAGE_STYLE[stg]["row_bg"], alpha=0.85, zorder=0)
+            bg = STAGE_STYLE[stg]["mpl_bg"]
+            ax1.axvspan(dt0, dt1, color=bg, alpha=0.75, zorder=0)
+            ax2.axvspan(dt0, dt1, color=bg, alpha=0.55, zorder=0)
+            ax3.axvspan(dt0, dt1, color=bg, alpha=0.50, zorder=0)
 
     dates = view_data.index
     opens = view_data["Open"].values
@@ -696,9 +701,20 @@ def build_full_download_image(data, company_name, code, panel):
             sp.set_linewidth(1.3)
 
         cax.add_patch(
-            mpatches.Rectangle((0, 0.81), 1, 0.19, facecolor="#1E3A8A", edgecolor="none", transform=cax.transAxes)
+            mpatches.Rectangle(
+                (0, 0.81), 1, 0.19, facecolor="#1E3A8A", edgecolor="none", transform=cax.transAxes
+            )
         )
-        cax.text(0.03, 0.905, title, color="#FFFFFF", fontsize=10, fontweight="bold", va="center", transform=cax.transAxes)
+        cax.text(
+            0.03,
+            0.905,
+            title,
+            color="#FFFFFF",
+            fontsize=10,
+            fontweight="bold",
+            va="center",
+            transform=cax.transAxes,
+        )
 
         if title == "단계별 구간 및 근거":
             y = 0.71
@@ -714,30 +730,125 @@ def build_full_download_image(data, company_name, code, panel):
                         transform=cax.transAxes,
                     )
                 )
-                cax.text(0.115, y, it["stage"], color="#FFFFFF", fontsize=7.5, fontweight="bold", ha="center", va="center", transform=cax.transAxes)
-                cax.text(0.22, y, f"{it['period']} | {it['desc']}", color="#1E293B", fontsize=7.5, va="center", transform=cax.transAxes)
+                cax.text(
+                    0.115,
+                    y,
+                    it["stage"],
+                    color="#FFFFFF",
+                    fontsize=7.5,
+                    fontweight="bold",
+                    ha="center",
+                    va="center",
+                    transform=cax.transAxes,
+                )
+                cax.text(
+                    0.22,
+                    y,
+                    f"{it['period']} | {it['desc']}",
+                    color="#1E293B",
+                    fontsize=7.5,
+                    va="center",
+                    transform=cax.transAxes,
+                )
                 y -= 0.125
 
         elif title == "매수 / 매도 전략":
-            cax.text(0.04, 0.69, " 매수 지점 ", color="#FFFFFF", fontsize=8, fontweight="bold", va="center",
-                     bbox=dict(boxstyle="round,pad=0.2", fc="#16A34A", ec="none"), transform=cax.transAxes)
-            cax.text(0.04, 0.56, f"✔ {panel['buy1']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
-            cax.text(0.04, 0.44, f"✔ {panel['buy2']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
+            cax.text(
+                0.04,
+                0.69,
+                " 매수 지점 ",
+                color="#FFFFFF",
+                fontsize=8,
+                fontweight="bold",
+                va="center",
+                bbox=dict(boxstyle="round,pad=0.2", fc="#16A34A", ec="none"),
+                transform=cax.transAxes,
+            )
+            cax.text(
+                0.04,
+                0.56,
+                f"✔ {panel['buy1']}",
+                color="#1E293B",
+                fontsize=8,
+                va="center",
+                transform=cax.transAxes,
+            )
+            cax.text(
+                0.04,
+                0.44,
+                f"✔ {panel['buy2']}",
+                color="#1E293B",
+                fontsize=8,
+                va="center",
+                transform=cax.transAxes,
+            )
 
-            cax.text(0.04, 0.29, " 매도 지점 ", color="#FFFFFF", fontsize=8, fontweight="bold", va="center",
-                     bbox=dict(boxstyle="round,pad=0.2", fc="#DC2626", ec="none"), transform=cax.transAxes)
-            cax.text(0.04, 0.16, f"✔ {panel['sell1']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
-            cax.text(0.04, 0.05, f"✔ {panel['sell2']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
+            cax.text(
+                0.04,
+                0.29,
+                " 매도 지점 ",
+                color="#FFFFFF",
+                fontsize=8,
+                fontweight="bold",
+                va="center",
+                bbox=dict(boxstyle="round,pad=0.2", fc="#DC2626", ec="none"),
+                transform=cax.transAxes,
+            )
+            cax.text(
+                0.04,
+                0.16,
+                f"✔ {panel['sell1']}",
+                color="#1E293B",
+                fontsize=8,
+                va="center",
+                transform=cax.transAxes,
+            )
+            cax.text(
+                0.04,
+                0.05,
+                f"✔ {panel['sell2']}",
+                color="#1E293B",
+                fontsize=8,
+                va="center",
+                transform=cax.transAxes,
+            )
 
         elif title == "손절 기준":
-            cax.text(0.5, 0.42, f"⚠️\n{panel['stop_text']}", color="#1E293B", fontsize=9.5, fontweight="bold",
-                     ha="center", va="center", transform=cax.transAxes)
+            cax.text(
+                0.5,
+                0.42,
+                f"⚠️\n{panel['stop_text']}",
+                color="#1E293B",
+                fontsize=9.5,
+                fontweight="bold",
+                ha="center",
+                va="center",
+                transform=cax.transAxes,
+            )
 
         elif title == "종합 결론":
-            cax.text(0.04, 0.65, f"✔ {panel['conclusion_title']}", color="#15803D", fontsize=10.5, fontweight="bold",
-                     ha="left", va="center", transform=cax.transAxes)
-            cax.text(0.04, 0.34, panel["conclusion_body"], color="#1E293B", fontsize=8.5,
-                     ha="left", va="center", wrap=True, transform=cax.transAxes)
+            cax.text(
+                0.04,
+                0.65,
+                f"✔ {panel['conclusion_title']}",
+                color="#15803D",
+                fontsize=10.5,
+                fontweight="bold",
+                ha="left",
+                va="center",
+                transform=cax.transAxes,
+            )
+            cax.text(
+                0.04,
+                0.34,
+                panel["conclusion_body"],
+                color="#1E293B",
+                fontsize=8.5,
+                ha="left",
+                va="center",
+                wrap=True,
+                transform=cax.transAxes,
+            )
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, facecolor="#FFFFFF")
@@ -749,7 +860,7 @@ def build_full_download_image(data, company_name, code, panel):
 def render():
     _apply_bright_style()
     st.title("스탠 와인스타인 4단계 주식 분석기")
-    st.caption("50일선·200일선 기준 | 최근 1년 차트 표시 | 단계별 음영 | 거래량 | Mansfield 상대강도")
+    st.caption("50일선·200일선 기준 | 최근 1년 차트 표시 | Stage별 밝은 음영 | 거래량 | Mansfield 상대강도")
 
     with st.sidebar:
         st.header("분석 설정")
@@ -814,7 +925,7 @@ def render():
             panel = make_summary_panel_data(analyzed, summary)
             full_png = build_full_download_image(analyzed, company, code, panel)
 
-            # 1) 최근 1년치 Plotly 차트 출력
+            # 1) 최근 1년치 Plotly 차트 출력 (Stage별 밝은 음영 포함)
             st.plotly_chart(fig, use_container_width=True)
 
             # 2) 첨부 이미지의 4단 요약 패널 출력
