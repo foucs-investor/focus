@@ -153,7 +153,7 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
         keyword in lower_name or keyword in lower_theme
         for keyword in ["조선", "방산", "우주", "항공"]
     ):
-        return "조선/방산"
+        return "조선/방산/우주"
 
     # 8. 친환경에너지
     elif any(
