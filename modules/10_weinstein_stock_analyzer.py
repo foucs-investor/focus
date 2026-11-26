@@ -7,7 +7,7 @@
 - 전체 결과 PNG 이미지 및 CSV 다운로드 지원
 """
 
-from datetime import timedelta
+from datetime import date, timedelta
 import io
 import os
 import re
@@ -256,7 +256,6 @@ def classify_stages(df):
     return stage
 
 
-# 차트 구간별 밝은 음영 색상 (Plotly & Matplotlib 공용)
 STAGE_BRIGHT_COLORS = {
     "Stage 1": "rgba(96, 165, 250, 0.24)",   # 밝은 파랑
     "Stage 2": "rgba(74, 222, 128, 0.26)",   # 밝은 초록
