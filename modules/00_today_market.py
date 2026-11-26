@@ -22,6 +22,66 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
+# ETF명 Hover 시 주요 구성 종목 말풍선 표시용 매핑
+ETF_TOP_HOLDINGS: dict[str, list[str]] = {
+    "KODEX 반도체": ["SK하이닉스", "삼성전자", "한미반도체", "리노공업", "이수페타시스"],
+    "KODEX AI반도체TOP2플러스": ["SK하이닉스", "삼성전자", "한미반도체", "DB하이텍", "원익IPS"],
+    "KODEX AI반도체핵심장비": ["한미반도체", "원익IPS", "주성엔지니어링", "이오테크닉스", "HPSP"],
+    "SOL AI반도체소부장": ["이수페타시스", "한미반도체", "리노공업", "원익IPS", "동진쎄미켐"],
+    "TIGER 200 IT": ["삼성전자", "SK하이닉스", "LG전자", "삼성전기", "LG디스플레이"],
+    "SOL 반도체전공정": ["원익IPS", "주성엔지니어링", "한미반도체", "테스", "유진테크"],
+    "SOL 반도체후공정": ["한미반도체", "이오테크닉스", "하나마이크론", "대덕전자", "심텍"],
+    "KODEX AI전력핵심설비": ["HD현대일렉트릭", "효성중공업", "LS ELECTRIC", "제룡전기", "산일전기"],
+    "ACE 원자력테마딥서치": ["두산에너빌리티", "한국전력", "현대건설", "한전기술", "비에이치아이"],
+    "HANARO FN친환경에너지": ["한화솔루션", "씨에스윈드", "OCI홀딩스", "두산퓨얼셀", "태웅"],
+    "PLUS 태양광&ESS": ["한화솔루션", "OCI홀딩스", "HD현대에너지솔루션", "파루", "신성이엔지"],
+    "KODEX 은행": ["KB금융", "신한지주", "하나금융지주", "우리금융지주", "기업은행"],
+    "KODEX 보험": ["삼성생명", "삼성화재", "DB손해보험", "현대해상", "한화생명"],
+    "KODEX 증권": ["미래에셋증권", "한국금융지주", "삼성증권", "NH투자증권", "키움증권"],
+    "TIGER 지주회사": ["SK", "HD현대", "LG", "CJ", "두산"],
+    "TIGER 코스피고배당": ["KB금융", "신한지주", "하나금융지주", "KT&G", "기업은행"],
+    "TIGER 우선주": ["삼성전자우", "현대차2우B", "LG화학우", "미래에셋증권2우B", "NH투자증권우"],
+    "KODEX 코리아밸류업": ["SK하이닉스", "삼성전자", "KB금융", "신한지주", "현대차"],
+    "KODEX 바이오": ["삼성바이오로직스", "셀트리온", "알테오젠", "유한양행", "SK바이오팜"],
+    "TIGER 바이오 TOP 10": ["삼성바이오로직스", "셀트리온", "알테오젠", "HLB", "리가켐바이오"],
+    "HANARO 바이오코리아액티브": ["알테오젠", "삼성바이오로직스", "셀트리온", "리가켐바이오", "삼천당제약"],
+    "TIGER 의료기기": ["덴티움", "바텍", "레이", "뷰웍스", "인터로조"],
+    "KIWOOM 의료AI": ["뷰노", "루닛", "제이엘케이", "딥노이드", "셀바스AI"],
+    "KODEX 로봇액티브": ["레인보우로보틱스", "두산로보틱스", "로보티즈", "뉴로메카", "티로보틱스"],
+    "TIGER SOFTWARE": ["더존비즈온", "카카오페이", "엔씨소프트", "넷마블", "크래프톤"],
+    "TIGER 인터넷TOP10": ["NAVER", "카카오", "SOOP", "엔씨소프트", "넷마블"],
+    "RISE 플랫폼테마": ["NAVER", "카카오", "크래프톤", "엔씨소프트", "더존비즈온"],
+    "TIGER 미디어컨텐츠": ["CJ ENM", "스튜디오드래곤", "제일기획", "하이브", "콘텐트리중앙"],
+    "RISE 5G테크": ["에이스테크", "오이솔루션", "서진시스템", "이노와이어리스", "RFHIC"],
+    "TIGER 200 헬스케어": ["삼성바이오로직스", "셀트리온", "알테오젠", "유한양행", "SK바이오팜"],
+    "TIGER 조선TOP10": ["HD한국조선해양", "HD현대중공업", "한화오션", "삼성중공업", "HD현대미포"],
+    "PLUS K방산": ["한화에어로스페이스", "현대로템", "한국항공우주", "LIG넥스원", "한화시스템"],
+    "KODEX 자동차": ["현대차", "기아", "현대모비스", "HL만도", "한온시스템"],
+    "TIGER 200 중공업": ["HD한국조선해양", "HD현대중공업", "두산에너빌리티", "한화오션", "삼성중공업"],
+    "HANARO CAPEX설비투자iSelect": ["HD현대일렉트릭", "효성중공업", "한화에어로스페이스", "HD한국조선해양", "LS ELECTRIC"],
+    "KODEX 건설": ["현대건설", "DL이앤씨", "GS건설", "대우건설", "HDC현대산업개발"],
+    "KODEX 철강": ["POSCO홀딩스", "현대제철", "고려아연", "동국제강", "세아베스틸지주"],
+    "KODEX 에너지화학": ["LG화학", "SK이노베이션", "롯데케미칼", "S-Oil", "금호석유"],
+    "TIGER 2차전지테마": ["LG에너지솔루션", "POSCO홀딩스", "에코프로비엠", "에코프로", "삼성SDI"],
+    "TIGER 2차전지소재Fn": ["에코프로비엠", "POSCO홀딩스", "엘앤에프", "SK아이이테크놀로지", "코스모신소재"],
+    "TIGER 화장품": ["APR", "아모레퍼시픽", "LG생활건강", "한국콜마", "코스맥스"],
+    "HANARO K-뷰티": ["APR", "한국콜마", "코스맥스", "아모레퍼시픽", "실리콘투"],
+    "TIGER 중국소비테마": ["아모레퍼시픽", "LG생활건강", "오리온", "호텔신라", "코스맥스"],
+    "TIGER 여행레저": ["파라다이스", "GKL", "하나투어", "모두투어", "강원랜드"],
+    "ACE KPOP포커스": ["하이브", "에스엠", "JYP Ent.", "와이지엔터테인먼트", "디어유"],
+    "KODEX 미디어&엔터테인먼트": ["하이브", "CJ ENM", "에스엠", "JYP Ent.", "스튜디오드래곤"],
+    "KODEX 게임산업": ["크래프톤", "엔씨소프트", "넷마블", "시프트업", "펄어비스"],
+    "TIGER 게임TOP10": ["크래프톤", "시프트업", "엔씨소프트", "넷마블", "위메이드"],
+    "TIGER 경기방어": ["KT&G", "SK텔레콤", "KT", "LG유플러스", "한국전력"],
+    "TIGER 200 생활소비재": ["KT&G", "아모레퍼시픽", "LG생활건강", "오리온", "CJ제일제당"],
+    "KODEX 경기소비재": ["현대차", "기아", "현대모비스", "강원랜드", "호텔신라"],
+    "HANARO Fn K-푸드": ["삼양식품", "오리온", "농심", "CJ제일제당", "빙그레"],
+    "MIDAS 중소형액티브": ["주요 중소형 성장·가치주 포트폴리오 (액티브 운용)"],
+    "ACE K휴머노이드로봇산업TOP2+": ["레인보우로보틱스", "두산로보틱스", "로보티즈", "뉴로메카", "에스피지"],
+    "KoAct 광통신&위성네트워크액티브": ["서진시스템", "오이솔루션", "RFHIC", "AP위성", "인텔리안테크"],
+    "TIGER 글로벌AI사이버보안": ["Palo Alto Networks", "CrowdStrike", "Fortinet", "Zscaler", "Okta"],
+}
+
 
 def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     """티커, 전체 종목명, 세부 테마명을 기반으로 상위 대분류 테마로 묶어주는 함수"""
@@ -405,7 +465,6 @@ def _load_etf_history_safely(tickers: list[str], period: str = "2y") -> tuple[pd
     except Exception:
         pass
 
-    # Sortino Ratio(20일 MA + 63/126/252일 윈도우) 계산에 충분한 거래일(최소 40일)이 없으면 2년치 직접 조회
     if df_raw.empty or len(df_raw.dropna(how="all")) < 40:
         try:
             dl = yf.download(tickers, period="2y", auto_adjust=True, progress=False)
@@ -515,6 +574,187 @@ def _get_sortino_ma20_timeline_desc(
     # 날짜 기준 최근순 정렬
     df_timeline = df_timeline.sort_index(ascending=False)
     return df_timeline
+
+
+def _get_top_holdings_text(etf_name: str) -> str:
+    """ETF명에 대응하는 주요 구성 종목 문자열 반환"""
+    if not etf_name:
+        return ""
+    if etf_name in ETF_TOP_HOLDINGS:
+        return ", ".join(ETF_TOP_HOLDINGS[etf_name])
+
+    for key, holdings in ETF_TOP_HOLDINGS.items():
+        if key in etf_name or etf_name in key:
+            return ", ".join(holdings)
+
+    return "구성 종목 정보 준비 중"
+
+
+def _render_sortino_timeline_with_tooltips(df_timeline: pd.DataFrame) -> None:
+    """
+    Sortino Ratio 기반 필터링 타임라인(날짜 최근순)을 HTML 테이블로 렌더링하며,
+    각 ETF명 위에 마우스를 올리면 주요 구성 종목이 말풍선으로 표시됩니다.
+    """
+    if df_timeline.empty:
+        st.info("Sortino Ratio(20일 이동평균선 충족군) 타임라인을 계산할 과거 시세 데이터가 부족합니다.")
+        return
+
+    style_block = """
+    <style>
+      .sortino-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+        overflow-y: visible;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        background-color: #0f172a;
+        padding: 12px 8px 48px 8px;
+      }
+      .sortino-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        color: #e2e8f0;
+        font-family: "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+      }
+      .sortino-table th, .sortino-table td {
+        border: 1px solid #1e293b;
+        padding: 7px 9px;
+        white-space: nowrap;
+        text-align: left;
+      }
+      .sortino-table th {
+        background-color: #1e293b;
+        color: #f8fafc;
+        position: sticky;
+        top: 0;
+        z-index: 2;
+      }
+      .sortino-table th:first-child, .sortino-table td:first-child {
+        position: sticky;
+        left: 0;
+        background-color: #0f172a;
+        font-weight: 700;
+        color: #38bdf8;
+        z-index: 1;
+      }
+      .sortino-table th:first-child {
+        z-index: 3;
+        background-color: #1e293b;
+      }
+      .etf-tooltip-item {
+        display: inline-block;
+        cursor: help;
+        border-bottom: 1px dotted #64748b;
+      }
+      .etf-tooltip-item:hover {
+        color: #fbbf24;
+        border-bottom-color: #fbbf24;
+      }
+      .etf-tooltip-box {
+        position: relative;
+        display: inline-block;
+      }
+      .etf-tooltip-box .bubble-popup {
+        display: none;
+        position: absolute;
+        left: 50%;
+        transform: translateX(-50%);
+        background-color: #020617;
+        color: #f8fafc;
+        border: 1px solid #38bdf8;
+        border-radius: 8px;
+        padding: 8px 12px;
+        font-size: 12px;
+        line-height: 1.45;
+        min-width: 220px;
+        max-width: 320px;
+        white-space: normal;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.65);
+        z-index: 10000;
+        pointer-events: none;
+      }
+      .etf-tooltip-box .bubble-top {
+        bottom: 130%;
+      }
+      .etf-tooltip-box .bubble-top::after {
+        content: "";
+        position: absolute;
+        top: 100%;
+        left: 50%;
+        margin-left: -6px;
+        border-width: 6px;
+        border-style: solid;
+        border-color: #38bdf8 transparent transparent transparent;
+      }
+      .etf-tooltip-box .bubble-bottom {
+        top: 130%;
+      }
+      .etf-tooltip-box .bubble-bottom::before {
+        content: "";
+        position: absolute;
+        bottom: 100%;
+        left: 50%;
+        margin-left: -6px;
+        border-width: 6px;
+        border-style: solid;
+        border-color: transparent transparent #38bdf8 transparent;
+      }
+      .etf-tooltip-box:hover .bubble-popup {
+        display: block;
+      }
+    </style>
+    """
+
+    header_cells = [f"<th>{df_timeline.index.name or 'Date'}</th>"] + [
+        f"<th>{col}</th>" for col in df_timeline.columns
+    ]
+    thead_html = f"<thead><tr>{''.join(header_cells)}</tr></thead>"
+
+    body_rows = []
+    for row_idx, (dt_label, row) in enumerate(df_timeline.iterrows()):
+        popup_dir_class = "bubble-bottom" if row_idx < 2 else "bubble-top"
+        cells = [f"<td>{dt_label}</td>"]
+        for col in df_timeline.columns:
+            etf_name = str(row[col]) if pd.notna(row[col]) else ""
+            if not etf_name:
+                cells.append("<td></td>")
+                continue
+
+            holdings_str = _get_top_holdings_text(etf_name)
+            safe_etf = (
+                etf_name.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            safe_holdings = (
+                holdings_str.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+
+            cell_html = (
+                f"<td>"
+                f"<span class='etf-tooltip-box'>"
+                f"<span class='etf-tooltip-item'>{safe_etf}</span>"
+                f"<span class='bubble-popup {popup_dir_class}'>"
+                f"<b>{safe_etf}</b><br/>"
+                f"<span style='color:#94a3b8;'>주요 구성종목:</span> {safe_holdings}"
+                f"</span>"
+                f"</span>"
+                f"</td>"
+            )
+            cells.append(cell_html)
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+
+    tbody_html = f"<tbody>{''.join(body_rows)}</tbody>"
+    table_html = (
+        f"{style_block}"
+        f"<div class='sortino-table-wrap'>"
+        f"<table class='sortino-table'>{thead_html}{tbody_html}</table>"
+        f"</div>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
 
 
 def render():
@@ -727,4 +967,4 @@ def render():
     if df_sortino_ma20.empty:
         st.info("Sortino Ratio(20일 이동평균선 충족군) 타임라인을 계산할 과거 시세 데이터가 부족합니다.")
     else:
-        st.dataframe(df_sortino_ma20, use_container_width=True)
+        _render_sortino_timeline_with_tooltips(df_sortino_ma20)
