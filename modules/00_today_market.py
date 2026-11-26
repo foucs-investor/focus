@@ -166,22 +166,29 @@ def _normalize_tickers_and_names(tickers_obj, name_mapping_obj) -> tuple[list[st
     if isinstance(name_mapping_obj, dict):
         for k, v in name_mapping_obj.items():
             if k is not None and v:
-                normalized_names[str(k)] = str(v).strip()
+                k_str = str(k).strip()
+                v_str = str(v).strip()
+                normalized_names[k_str] = v_str
+                normalized_names[k_str.replace(".KS", "").replace(".KQ", "")] = v_str
 
     if isinstance(tickers_obj, dict):
         for k, v in tickers_obj.items():
             t_str = str(k).strip()
             if t_str:
                 normalized_tickers.append(t_str)
-                if v and t_str not in normalized_names:
-                    normalized_names[t_str] = str(v).strip()
+                if v:
+                    v_str = str(v).strip()
+                    if t_str not in normalized_names:
+                        normalized_names[t_str] = v_str
+                    short_k = t_str.replace(".KS", "").replace(".KQ", "")
+                    if short_k not in normalized_names:
+                        normalized_names[short_k] = v_str
     elif isinstance(tickers_obj, (list, tuple, set)):
         for item in tickers_obj:
             t_str = str(item).strip()
             if t_str:
                 normalized_tickers.append(t_str)
 
-    # 중복 제거하되 순서 유지
     unique_tickers = list(dict.fromkeys(normalized_tickers))
     return unique_tickers, normalized_names
 
@@ -271,7 +278,6 @@ def _fetch_naver_etfs_api(tickers: list[str]) -> tuple[dict[str, float], dict[st
         except Exception:
             continue
 
-    # 배치에서 누락된 종목은 개별 /basic API로 보완
     missing_codes = [
         c
         for c, t_list in code_to_tickers.items()
@@ -338,38 +344,77 @@ def _get_etf_returns_and_names(
     resolved_names: dict[str, str] = {}
 
     for t in tickers:
-        candidate_name = base_names.get(t) or naver_names.get(t)
+        short_t = t.replace(".KS", "").replace(".KQ", "")
+        candidate_name = (
+            base_names.get(t)
+            or base_names.get(short_t)
+            or naver_names.get(t)
+            or naver_names.get(short_t)
+        )
         resolved_names[t] = _clean_etf_name(candidate_name, t)
 
-        if t not in returns and not etf_data.empty and t in etf_data.columns:
-            series = etf_data[t].dropna()
-            if len(series) >= 2:
-                prev_c = float(series.iloc[-2])
-                curr_c = float(series.iloc[-1])
-                if prev_c > 0:
-                    returns[t] = (curr_c - prev_c) / prev_c * 100.0
+        if t not in returns and not etf_data.empty:
+            col_target = t if t in etf_data.columns else (short_t if short_t in etf_data.columns else None)
+            if col_target is not None:
+                series = etf_data[col_target].dropna()
+                if len(series) >= 2:
+                    prev_c = float(series.iloc[-2])
+                    curr_c = float(series.iloc[-1])
+                    if prev_c > 0:
+                        returns[t] = (curr_c - prev_c) / prev_c * 100.0
 
     return returns, resolved_names
 
 
+def _extract_close_df(raw_obj, tickers: list[str]) -> pd.DataFrame:
+    """다양한 형태의 종가 DataFrame을 2차원 (날짜 x 종목) 형태로 정규화"""
+    if not isinstance(raw_obj, pd.DataFrame) or raw_obj.empty:
+        return pd.DataFrame()
+
+    df_out = raw_obj.copy()
+    if isinstance(df_out.columns, pd.MultiIndex):
+        level_0 = set(df_out.columns.get_level_values(0))
+        if "Close" in level_0:
+            df_out = df_out["Close"].copy()
+        elif "Adj Close" in level_0:
+            df_out = df_out["Adj Close"].copy()
+        else:
+            df_out.columns = df_out.columns.get_level_values(-1)
+
+    df_out.index = pd.to_datetime(df_out.index)
+    df_out = df_out.loc[~df_out.index.duplicated(keep="last")].sort_index()
+    return df_out
+
+
 def _load_etf_history_safely(tickers: list[str], period: str = "2y") -> tuple[pd.DataFrame, dict[str, str]]:
-    """download_etf_data를 호출하되, 빈 결과나 예외가 발생해도 안전하게 처리"""
+    """
+    download_etf_data를 호출하되, 빈 결과/짧은 기간/예외 발생 시
+    yfinance 2년 일봉 데이터를 직접 다운로드해 충분한 과거 시세를 확보
+    """
     df_raw = pd.DataFrame()
     name_map: dict[str, str] = {}
+
     try:
         res = download_etf_data(tickers, period=period)
         if isinstance(res, tuple) and len(res) >= 2:
-            if isinstance(res[0], pd.DataFrame):
-                df_raw = res[0].copy()
+            df_raw = _extract_close_df(res[0], tickers)
             if isinstance(res[1], dict):
-                name_map = res[1]
+                name_map = {str(k): str(v) for k, v in res[1].items() if k and v}
         elif isinstance(res, pd.DataFrame):
-            df_raw = res.copy()
+            df_raw = _extract_close_df(res, tickers)
     except Exception:
         pass
 
-    if not df_raw.empty:
-        df_raw.index = pd.to_datetime(df_raw.index)
+    # Sortino Ratio(20일 MA + 63/126/252일 윈도우) 계산에 충분한 거래일(최소 40일)이 없으면 2년치 직접 조회
+    if df_raw.empty or len(df_raw.dropna(how="all")) < 40:
+        try:
+            dl = yf.download(tickers, period="2y", auto_adjust=True, progress=False)
+            fallback_df = _extract_close_df(dl, tickers)
+            if not fallback_df.empty and len(fallback_df.dropna(how="all")) > len(df_raw.dropna(how="all")):
+                df_raw = fallback_df
+        except Exception:
+            pass
+
     return df_raw, name_map
 
 
@@ -403,9 +448,10 @@ def _get_sortino_ma20_timeline_desc(
     if price_df.empty:
         return pd.DataFrame()
 
-    clean_df = price_df.drop(columns=["^KS11", "코스피"], errors="ignore").ffill()
+    clean_df = _extract_close_df(price_df, [])
+    clean_df = clean_df.drop(columns=["^KS11", "코스피"], errors="ignore").ffill()
     valid_days = clean_df.dropna(how="all").index
-    if len(valid_days) == 0:
+    if len(valid_days) < ma_filter_days:
         return pd.DataFrame()
 
     trading_days = valid_days[-last_n_days:]
@@ -438,11 +484,16 @@ def _get_sortino_ma20_timeline_desc(
                 scores[col] = float(np.mean(vals))
 
         if scores:
-            ranked_tickers = (
+            ranked_cols = (
                 pd.Series(scores).sort_values(ascending=False).head(top_n).index.tolist()
             )
             ranked_names = [
-                _clean_etf_name(name_map.get(t), t) for t in ranked_tickers
+                _clean_etf_name(
+                    name_map.get(str(c))
+                    or name_map.get(str(c).replace(".KS", "").replace(".KQ", "")),
+                    str(c),
+                )
+                for c in ranked_cols
             ]
         else:
             ranked_names = []
@@ -667,7 +718,7 @@ def render():
 
     df_sortino_ma20 = _get_sortino_ma20_timeline_desc(
         price_df=df_raw,
-        name_map=etf_names if etf_names else merged_names,
+        name_map={**merged_names, **etf_names},
         last_n_days=10,
         ma_filter_days=20,
         top_n=20,
