@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-스탠 와인스타인 4단계 주식 분석기 (TraderLion 기준 + 200일선 적용)
+스탠 와인스타인 4단계 주식 분석기 (200일선 기준 + Investor A/B + 트레일링 스탑)
 - Stage 1(Base), Stage 2(Advancing), Stage 3(Distribution), Stage 4(Declining) 특성 반영
-- 200일선 위치·기울기 및 50일선(10주선 상당)·거래량·Mansfield RS 연계 판정
+- 200일선 위치·기울기 및 50일선·거래량·Mansfield RS 연계 판정
+- 투자자(6~12개월) Stage 2 초기 진입시점: 돌파(Breakout) A 및 눌림목(Pullback) B
+- 이익 보호형 트레일링 스탑(Trailing Stop): 초기 손절선, 반등 확인 후 상향, Stage 3 타이트 상향, Stage 4 이탈 신호
 - Stage 1 -> Stage 3 직행 차단 및 인접 사이클 흐름 유지
 - 구간 폭이 좁아 라벨이 겹칠 경우 단계 숫자(1, 2, 3, 4)만 표기
 - 최근 1년 차트 표시 + Stage별 밝은 음영 + 다운로드 시 화면 유지
@@ -89,13 +91,31 @@ def _apply_bright_style():
     border: 1px solid #CBD5E1;
     border-radius: 8px;
     padding: 12px 16px;
+    margin-bottom: 12px;
+    font-size: 0.88rem;
+    line-height: 1.52;
+}
+.investor-guide-box {
+    background-color: #F0FDF4;
+    border: 1px solid #86EFAC;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    font-size: 0.88rem;
+    line-height: 1.52;
+}
+.trailing-guide-box {
+    background-color: #FFFBEB;
+    border: 1px solid #FCD34D;
+    border-radius: 8px;
+    padding: 12px 16px;
     margin-bottom: 14px;
     font-size: 0.88rem;
     line-height: 1.52;
 }
 .summary-grid {
     display: grid;
-    grid-template-columns: 1.35fr 1.25fr 0.85fr 1.15fr;
+    grid-template-columns: 1.35fr 1.25fr 0.9fr 1.15fr;
     gap: 10px;
     margin-top: 8px;
     margin-bottom: 16px;
@@ -168,7 +188,7 @@ def _apply_bright_style():
     border-radius: 4px;
     padding: 6px 8px;
 }
-.stop-center {
+.stop-box {
     height: 100%;
     min-height: 140px;
     display: flex;
@@ -178,6 +198,7 @@ def _apply_bright_style():
     text-align: center;
     font-weight: 700;
     color: #1E293B !important;
+    gap: 6px;
 }
 .conclusion-title {
     color: #15803D !important;
@@ -246,16 +267,12 @@ def resolve_company(name, listing):
 def _allowed_next_stages(curr_stage: str):
     """스탠 와인스타인 스테이지 전이 규칙 (Stage 1 -> Stage 3 직행 차단)."""
     if curr_stage == "Stage 1":
-        # Base에서는 상승 돌파(Stage 2) 또는 재이탈(Stage 4)로 이동
         return {"Stage 1", "Stage 2", "Stage 4"}
     if curr_stage == "Stage 2":
-        # Advancing에서는 고점권 분배/둔화(Stage 3) 또는 추세 이탈(Stage 4, Stage 1)
         return {"Stage 2", "Stage 3", "Stage 4", "Stage 1"}
     if curr_stage == "Stage 3":
-        # Distribution에서는 하락 전환(Stage 4) 또는 상승 재개(Stage 2)
         return {"Stage 3", "Stage 4", "Stage 2"}
     if curr_stage == "Stage 4":
-        # Declining에서는 바닥 다지기(Stage 1)로 진입
         return {"Stage 4", "Stage 1"}
     return {"Stage 1", "Stage 2", "Stage 3", "Stage 4"}
 
@@ -273,10 +290,6 @@ def _raw_candidate_stage_traderlion_200ma(
 ):
     """
     TraderLion Stage Analysis 원칙을 200일선 중심으로 적용한 일차 후보 단계 판정.
-    - Stage 2 (Advancing): 주가 > 200일선, 200일선 상승/돌파, 상승 추세 유지
-    - Stage 3 (Distribution): 고점권(60일 고점 근접)에서 상승 둔화·변동성/횡보·50일선 하향 시도·200일선 기울기 둔화
-    - Stage 4 (Declining): 200일선 하향 이탈 및 200일선 하락 추세 진행(저점/고점 하락)
-    - Stage 1 (Base): 하락 추세 진정 후 200일선 평평화 및 저점권 횡보·바닥 다지기
     """
     if pd.isna(ma200_val):
         return "데이터 축적 중"
@@ -286,9 +299,6 @@ def _raw_candidate_stage_traderlion_200ma(
     vol_ratio = 1.0 if pd.isna(vol_ratio_val) else float(vol_ratio_val)
     below_ma50 = pd.notna(ma50_val) and (close_val < float(ma50_val))
 
-    # Stage 3 (Distribution / Topping):
-    # Stage 2 또는 Stage 3 진행 중 고점권(60일 고점의 84% 이상)에 있으며
-    # 200일선 기울기가 둔화되거나 단기 조정이 시작되고 50일선 압박/거래량 변동을 보이는 구간
     dist_signal = (
         bool(near_high60_val)
         and (slope <= 0.014 or ret10 < -0.015 or (below_ma50 and vol_ratio >= 1.0))
@@ -297,28 +307,21 @@ def _raw_candidate_stage_traderlion_200ma(
     if prev_stage in {"Stage 2", "Stage 3"} and dist_signal:
         return "Stage 3"
 
-    # Stage 2 (Advancing):
-    # 주가가 200일선 위에서 상승 추세를 이어가거나 돌파하는 구간
     if close_val > ma200_val and slope >= -0.002:
         return "Stage 2"
 
-    # Stage 4 (Declining):
-    # 주가가 200일선 아래로 밀리고 200일선 기울기가 하락세로 전환/진행되는 구간
     if close_val < ma200_val and slope < -0.003:
         return "Stage 4"
 
-    # Stage 2/3에서 200일선 아래로 하락 이탈하는 경우
     if prev_stage in {"Stage 2", "Stage 3"} and close_val < ma200_val * 0.985 and ret10 < -0.025:
         return "Stage 4"
 
-    # Stage 4에서 하락폭이 멈추고 저점권 횡보·200일선 평평화로 전환되는 경우 Stage 1 (Base)
     if prev_stage == "Stage 4":
         near_low60 = pd.notna(low60_val) and (close_val <= float(low60_val) * 1.13)
         if slope >= -0.003 and (near_low60 or close_val >= ma200_val * 0.95):
             return "Stage 1"
         return "Stage 4"
 
-    # Stage 1 (Base): 바닥권 횡보 및 베이스 형성 구간
     return "Stage 1"
 
 
@@ -465,6 +468,205 @@ def slice_recent_1y(data):
     return sliced if not sliced.empty else data
 
 
+def detect_investor_ab_points(data):
+    """
+    투자자(Investor, 6~12개월 투자)의 Stage 2 초기 진입시점(200일선 기준):
+    - A (Breakout / 돌파): 직전 20일 고점(저항선) 상향 돌파 + 200일선 부근/상방 안착 + 거래량 확인 시점
+    - B (Pullback / 눌림목): A 돌파 이후 3~25거래일 내 돌파선/200일선 지지 테스트 및 재반등 확인 시점
+    """
+    view = slice_recent_1y(data)
+    if len(view) < 25:
+        return {"a_point": None, "b_point": None, "resistance_level": None}
+
+    close = view["Close"]
+    low = view["Low"]
+    ma200 = view["MA200"]
+    vol = view["Volume"]
+    vol_avg20 = vol.rolling(20, min_periods=5).mean()
+    prev_high20 = view["High"].shift(1).rolling(20, min_periods=10).max()
+
+    a_idx = None
+    breakout_level = None
+
+    for i in range(20, len(view)):
+        c_val = float(close.iloc[i])
+        res_val = prev_high20.iloc[i]
+        m200_val = ma200.iloc[i]
+        v_val = float(vol.iloc[i])
+        v_avg = float(vol_avg20.iloc[i]) if pd.notna(vol_avg20.iloc[i]) and vol_avg20.iloc[i] > 0 else 0.0
+
+        if pd.isna(res_val) or pd.isna(m200_val):
+            continue
+
+        above_200 = c_val >= float(m200_val) * 0.98
+        broke_res = c_val > float(res_val) and float(close.iloc[i - 1]) <= float(res_val) * 1.01
+        vol_ok = v_avg == 0.0 or v_val >= v_avg * 1.05
+
+        if broke_res and above_200 and vol_ok:
+            a_idx = i
+            breakout_level = float(res_val)
+
+    if a_idx is None:
+        valid_mask = (close > prev_high20) & (close >= ma200 * 0.97)
+        valid_positions = np.where(valid_mask.fillna(False).values)[0]
+        valid_positions = [p for p in valid_positions if p >= 20]
+        if valid_positions:
+            a_idx = int(valid_positions[-1])
+            breakout_level = float(prev_high20.iloc[a_idx])
+
+    a_point = None
+    if a_idx is not None:
+        a_point = {
+            "date": view.index[a_idx],
+            "price": float(close.iloc[a_idx]),
+            "low": float(low.iloc[a_idx]),
+            "level": float(breakout_level) if breakout_level is not None else float(close.iloc[a_idx]),
+        }
+
+    b_point = None
+    if a_idx is not None and a_idx + 3 < len(view):
+        search_end = min(len(view), a_idx + 30)
+        support_ref = max(
+            float(breakout_level) * 0.95 if breakout_level is not None else float(close.iloc[a_idx]) * 0.95,
+            float(ma200.iloc[a_idx]) * 0.97 if pd.notna(ma200.iloc[a_idx]) else 0.0,
+        )
+        best_b = None
+        for j in range(a_idx + 2, search_end):
+            l_val = float(low.iloc[j])
+            c_val = float(close.iloc[j])
+            m200_j = float(ma200.iloc[j]) if pd.notna(ma200.iloc[j]) else l_val
+            near_support = abs(l_val - support_ref) / max(support_ref, 1.0) <= 0.06 or (
+                l_val <= m200_j * 1.04 and c_val >= m200_j * 0.97
+            )
+            rebound_ok = c_val >= float(close.iloc[j - 1]) * 0.99
+            if near_support and rebound_ok:
+                best_b = j
+                break
+
+        if best_b is not None:
+            b_point = {
+                "date": view.index[best_b],
+                "price": float(close.iloc[best_b]),
+                "low": float(low.iloc[best_b]),
+                "support_ref": support_ref,
+            }
+
+    return {
+        "a_point": a_point,
+        "b_point": b_point,
+        "resistance_level": breakout_level,
+    }
+
+
+def compute_trailing_stop_200ma(data, ab_info=None):
+    """
+    200일선 기준 트레일링 스탑(이익 보호형 매도 전략) 시계열 및 현재 손절선 산출:
+    1) 초기 손절선: 돌파(A) 직전 저점/베이스 하단 아래 또는 200일선 하단 기준
+    2) 조정 후 반등(이전 하락분 회복) 확인 시 손절선을 200일선 아래(또는 직전 스윙 저점)로 단계적 상향
+    3) Stage 3 진입 시 최근 조정 저점(200일선 상단 스윙 저점) 쪽으로 공격적 상향
+    4) 손절선 하향 이탈 또는 Stage 4 진입 시 스탑아웃(Stopped out) 표시
+    """
+    if ab_info is None:
+        ab_info = detect_investor_ab_points(data)
+
+    view = slice_recent_1y(data)
+    if view.empty:
+        return {
+            "stop_series": pd.Series(dtype="float64"),
+            "current_stop": 0.0,
+            "mode_label": "손절선 산출 대기",
+            "stopped_out": False,
+            "stop_event": None,
+        }
+
+    close = view["Close"]
+    low = view["Low"]
+    high = view["High"]
+    ma200 = view["MA200"]
+    stages = view["Stage"]
+
+    a_pt = ab_info.get("a_point")
+    base_low = float(low.iloc[: min(20, len(low))].min())
+    init_stop = round(min(base_low * 0.96, float(ma200.iloc[0]) * 0.95 if pd.notna(ma200.iloc[0]) else base_low * 0.96), -2)
+    if a_pt is not None:
+        init_stop = round(min(init_stop, a_pt["low"] * 0.96), -2)
+
+    trailing_stop = float(init_stop)
+    stop_values = []
+    swing_high_since_pullback = float(high.iloc[0])
+    pullback_low = None
+    in_pullback = False
+    mode_label = "초기 손절선 설정"
+    stopped_out = False
+    stop_event = None
+
+    for i in range(len(view)):
+        c_val = float(close.iloc[i])
+        l_val = float(low.iloc[i])
+        h_val = float(high.iloc[i])
+        m200_val = float(ma200.iloc[i]) if pd.notna(ma200.iloc[i]) else c_val
+        stg = str(stages.iloc[i])
+
+        # 조정 시작 감지(전고점 대비 6% 이상 조정)
+        if h_val > swing_high_since_pullback:
+            swing_high_since_pullback = h_val
+
+        if not in_pullback and c_val < swing_high_since_pullback * 0.94:
+            in_pullback = True
+            pullback_low = l_val
+        elif in_pullback and pullback_low is not None and l_val < pullback_low:
+            pullback_low = l_val
+
+        # 조정 후 반등해 이전 고점(하락분)을 회복한 것이 확인되면 200일선 아래/최근 저점 기준으로 손절선 상향
+        if in_pullback and c_val >= swing_high_since_pullback * 0.99:
+            candidate_stop = max(
+                trailing_stop,
+                round(min(m200_val * 0.98, pullback_low * 0.99 if pullback_low else m200_val * 0.98), -2),
+            )
+            if candidate_stop > trailing_stop:
+                trailing_stop = candidate_stop
+                mode_label = "반등 확인 후 손절선 상향(200일선 기준)"
+            in_pullback = False
+            pullback_low = None
+            swing_high_since_pullback = h_val
+
+        # Stage 3 진입 시 최근 조정 저점 / 200일선 위 저점 쪽으로 공격적 상향
+        if stg == "Stage 3":
+            recent_low_15 = float(low.iloc[max(0, i - 15) : i + 1].min())
+            tight_stop = round(max(trailing_stop, min(recent_low_15 * 0.985, m200_val * 1.01)), -2)
+            if tight_stop > trailing_stop:
+                trailing_stop = tight_stop
+                mode_label = "Stage 3 진입 · 타이트 트레일링 상향"
+
+        # Stage 2 진행 중 200일선 상방 안착이 이어지면 200일선 하단 기준 완만 상향
+        if stg == "Stage 2" and c_val > m200_val * 1.03:
+            gradual_stop = round(max(trailing_stop, m200_val * 0.97), -2)
+            if gradual_stop > trailing_stop:
+                trailing_stop = gradual_stop
+                mode_label = "200일선 상승 추종 트레일링"
+
+        stop_values.append(trailing_stop)
+
+        # 트레일링 스탑 하향 이탈 또는 Stage 4 진입 시 스탑아웃 체크
+        if not stopped_out and (c_val < trailing_stop or (stg == "Stage 4" and i > 0 and str(stages.iloc[i - 1]) != "Stage 4")):
+            stopped_out = True
+            mode_label = "손절 실행 / Stage 4 하락 주의"
+            stop_event = {
+                "date": view.index[i],
+                "price": c_val,
+                "stop_price": trailing_stop,
+            }
+
+    stop_series = pd.Series(stop_values, index=view.index, dtype="float64")
+    return {
+        "stop_series": stop_series,
+        "current_stop": float(stop_series.iloc[-1]),
+        "mode_label": mode_label,
+        "stopped_out": stopped_out,
+        "stop_event": stop_event,
+    }
+
+
 def _get_segments(stage_series):
     if stage_series.empty:
         return []
@@ -552,9 +754,81 @@ def add_stage_shading_and_labels(fig, df):
             )
 
 
-def build_chart(data, company_name, code):
-    """최근 1년치 기준으로 Stage 음영 및 Stage 표기가 포함된 Plotly 차트를 생성합니다."""
+def add_investor_ab_and_stop_plotly(fig, ab_info, stop_info):
+    """Plotly 차트에 진입시점 A(돌파)/B(눌림목) 및 트레일링 스탑 라인/이탈 신호를 추가합니다."""
+    a_pt = ab_info.get("a_point")
+    b_pt = ab_info.get("b_point")
+    stop_series = stop_info.get("stop_series")
+    stop_event = stop_info.get("stop_event")
+
+    if stop_series is not None and not stop_series.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=stop_series.index,
+                y=stop_series.values,
+                name="트레일링 스탑(손절선)",
+                line=dict(color="#D97706", width=1.8, dash="dot"),
+            ),
+            row=1,
+            col=1,
+        )
+
+    if a_pt is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[a_pt["date"]],
+                y=[a_pt["low"] * 0.985],
+                mode="markers+text",
+                name="진입 A (Breakout 돌파)",
+                text=["A(돌파)"],
+                textposition="bottom center",
+                marker=dict(symbol="triangle-up", size=13, color="#059669", line=dict(color="#FFFFFF", width=1)),
+                textfont=dict(color="#065F46", size=11, family="Arial Black"),
+            ),
+            row=1,
+            col=1,
+        )
+
+    if b_pt is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[b_pt["date"]],
+                y=[b_pt["low"] * 0.985],
+                mode="markers+text",
+                name="진입 B (Pullback 눌림목)",
+                text=["B(눌림목)"],
+                textposition="bottom center",
+                marker=dict(symbol="diamond", size=11, color="#0284C7", line=dict(color="#FFFFFF", width=1)),
+                textfont=dict(color="#075985", size=11, family="Arial Black"),
+            ),
+            row=1,
+            col=1,
+        )
+
+    if stop_event is not None:
+        fig.add_trace(
+            go.Scatter(
+                x=[stop_event["date"]],
+                y=[stop_event["price"] * 1.02],
+                mode="markers+text",
+                name="손절 이탈(Stopped Out)",
+                text=["STOP"],
+                textposition="top center",
+                marker=dict(symbol="x", size=12, color="#DC2626", line=dict(color="#FFFFFF", width=1)),
+                textfont=dict(color="#B91C1C", size=11, family="Arial Black"),
+            ),
+            row=1,
+            col=1,
+        )
+
+
+def build_chart(data, company_name, code, ab_info=None, stop_info=None):
+    """최근 1년치 기준으로 Stage 음영·표기, A/B 진입시점, 트레일링 스탑을 포함한 Plotly 차트를 생성합니다."""
     view_data = slice_recent_1y(data)
+    if ab_info is None:
+        ab_info = detect_investor_ab_points(data)
+    if stop_info is None:
+        stop_info = compute_trailing_stop_200ma(data, ab_info)
 
     fig = make_subplots(
         rows=3,
@@ -563,7 +837,7 @@ def build_chart(data, company_name, code):
         vertical_spacing=0.035,
         row_heights=[0.62, 0.17, 0.21],
         subplot_titles=(
-            "주가 · 200일선(기준) · 50일선 (최근 1년 / TraderLion + 200일선 Stage)",
+            "주가 · 200일선(기준) · 50일선 + A(돌파)/B(눌림목) + 트레일링 스탑",
             "거래량",
             "Mansfield 상대강도 (KOSPI 대비)",
         ),
@@ -596,7 +870,7 @@ def build_chart(data, company_name, code):
         go.Scatter(
             x=view_data.index,
             y=view_data["MA50"],
-            name="50일선 (10주선 상당)",
+            name="50일선 (참고)",
             line=dict(color="#2474ff", width=1.6),
         ),
         row=1,
@@ -631,6 +905,7 @@ def build_chart(data, company_name, code):
     fig.add_hline(y=0, line_dash="dash", line_color="#246bff", row=3, col=1)
 
     add_stage_shading_and_labels(fig, view_data)
+    add_investor_ab_and_stop_plotly(fig, ab_info, stop_info)
 
     last = data.iloc[-1]
     stage_text = str(last["Stage"])
@@ -655,8 +930,13 @@ def build_chart(data, company_name, code):
     return fig
 
 
-def make_summary_panel_data(data, summary):
-    """200일선 기준 최근 1년 구간 및 최신 기준가 기반 4단 요약 패널 데이터를 생성합니다."""
+def make_summary_panel_data(data, summary, ab_info=None, stop_info=None):
+    """200일선 기준 최근 1년 구간, A/B 진입시점, 트레일링 스탑 및 최신 기준가 기반 4단 요약 패널 데이터를 생성합니다."""
+    if ab_info is None:
+        ab_info = detect_investor_ab_points(data)
+    if stop_info is None:
+        stop_info = compute_trailing_stop_200ma(data, ab_info)
+
     last = data.iloc[-1]
     close = float(last["Close"])
     ma200 = float(last["MA200"]) if pd.notna(last["MA200"]) else close
@@ -686,46 +966,67 @@ def make_summary_panel_data(data, summary):
 
     recent60 = data.tail(60)
     res_price = round(float(recent60["High"].max()), -2)
-    sup_price = round(float(recent60["Low"].min()), -2)
-    buy1_low = round(min(close, ma200) * 0.98, -2)
-    buy1_high = round(max(close, ma200) * 1.02, -2)
-    buy2_price = round(ma200, -2)
+
+    a_pt = ab_info.get("a_point")
+    b_pt = ab_info.get("b_point")
+
+    a_price_ref = round(a_pt["price"], -2) if a_pt is not None else round(max(close, ma200 * 1.02), -2)
+    b_price_ref = round(b_pt["price"], -2) if b_pt is not None else round(max(ma200, a_price_ref * 0.95), -2)
+
     sell1_price = round(max(close * 1.08, res_price), -2)
     sell2_price = round(sell1_price * 1.12, -2)
-    stop_price = round(min(sup_price, ma200 * 0.96), -2)
+    cur_stop = float(stop_info.get("current_stop", ma200 * 0.96))
+    mode_lbl = str(stop_info.get("mode_label", "트레일링 스탑"))
+    stopped_out = bool(stop_info.get("stopped_out", False))
+
+    a_label_txt = (
+        f"A(돌파 {a_pt['date'].strftime('%m.%d')}): {a_price_ref:,.0f}원 돌파·거래량 확인"
+        if a_pt is not None
+        else f"A(돌파 목표): {a_price_ref:,.0f}원 돌파·200일선 안착 확인"
+    )
+    b_label_txt = (
+        f"B(눌림목 {b_pt['date'].strftime('%m.%d')}): {b_price_ref:,.0f}원 지지 테스트 확인"
+        if b_pt is not None
+        else f"B(눌림목 대기): {b_price_ref:,.0f}원 부근 지지/거래량 확인"
+    )
 
     if stage == "Stage 2":
-        c_title = "Stage 2 상승 국면 (Advancing)"
+        c_title = "Stage 2 초기·상승 국면 (트레일링 보호 중)"
         c_body = (
-            f"200일선({ma200:,.0f}원) 위에서 상승 추세를 이어가는 구간입니다. "
-            f"{sell1_price:,.0f}원 저항과 200일선·50일선 지지 여부를 점검하세요."
+            f"200일선({ma200:,.0f}원) 기준 상승 추세 구간입니다. "
+            f"A/B 진입 이후 반등 회복 확인에 맞춰 트레일링 손절선({cur_stop:,.0f}원)을 추적 상향하며 대응하세요."
         )
     elif stage == "Stage 3":
-        c_title = "Stage 3 고점 분배 구간 (Distribution)"
+        c_title = "Stage 3 고점 분배 구간 (손절선 타이트 상향)"
         c_body = (
-            f"상승 모멘텀이 둔화되며 고점권 횡보·분배 흐름이 나타나는 구간입니다. "
-            f"{sell1_price:,.0f}원 저항과 200일선({ma200:,.0f}원) 기울기 변화를 확인하세요."
+            f"고점권 둔화 및 200일선 기울기 평평화 구간입니다. "
+            f"최근 조정 저점/200일선 기준 손절선({cur_stop:,.0f}원)을 올려 이익을 보호하세요."
         )
     elif stage == "Stage 4":
-        c_title = "Stage 4 하락 추세 구간 (Declining)"
+        c_title = "Stage 4 하락 추세 구간 (손절·비중 축소 우선)"
         c_body = (
-            f"200일선({ma200:,.0f}원) 아래에서 저점·고점이 낮아지는 하락 추세 구간입니다. "
-            f"{stop_price:,.0f}원 이탈 여부 및 추세 반전·베이스 형성 전까지 신중히 접근하세요."
+            f"손절선({cur_stop:,.0f}원) 및 200일선({ma200:,.0f}원) 하향 이탈 흐름이 나타난 구간입니다. "
+            f"추가 하락 위험이 있으므로 1단계 베이스 전환 전까지 보수적으로 대응하세요."
         )
     else:
         c_title = "Stage 1 바닥 다지기 구간 (Base)"
         c_body = (
-            f"하락 이후 200일선({ma200:,.0f}원) 부근에서 횡보하며 베이스를 다지는 구간입니다. "
-            f"{buy1_high:,.0f}원 돌파 및 거래량 동반 Stage 2 전환 신호를 확인하세요."
+            f"200일선({ma200:,.0f}원) 부근 베이스 형성 구간입니다. "
+            f"돌파(A: {a_price_ref:,.0f}원)와 눌림목(B: {b_price_ref:,.0f}원) 확인 뒤 초기 손절선({cur_stop:,.0f}원)을 관리하세요."
         )
+
+    stop_status_line = "손절 실행 / Stage 4 진입 주의" if stopped_out else "손절선 유지 중 (이익 보호)"
 
     return {
         "stage_items": stage_items,
-        "buy1": f"1차: {buy1_low:,.0f}~{buy1_high:,.0f}원 구간 돌파·지지 확인",
-        "buy2": f"2차: 200일선({buy2_price:,.0f}원) 지지 및 추세 확인 시 분할 접근",
+        "buy1": a_label_txt,
+        "buy2": b_label_txt,
         "sell1": f"단기 매도: {sell1_price:,.0f}원 부근 저항 점검",
         "sell2": f"추가 매도: {sell2_price:,.0f}원 부근 목표 점검",
-        "stop_text": f"{stop_price:,.0f}원 이탈 시\n(200일선 하향 이탈·추세 약화 확인)",
+        "stop_price_str": f"{cur_stop:,.0f}원 이탈 시",
+        "stop_mode_str": mode_lbl,
+        "stop_status_str": stop_status_line,
+        "stop_text": f"{cur_stop:,.0f}원 이탈 시\n[{mode_lbl}]\n{stop_status_line}",
         "conclusion_title": c_title,
         "conclusion_body": c_body,
     }
@@ -740,7 +1041,6 @@ def render_summary_panel_html(panel):
         f"</div>"
         for item in panel["stage_items"]
     )
-    stop_html = panel["stop_text"].replace("\n", "<br>")
 
     return (
         f'<div class="summary-grid">'
@@ -749,10 +1049,10 @@ def render_summary_panel_html(panel):
         f'<div class="summary-card-body">{rows_html}</div>'
         f"</div>"
         f'<div class="summary-card">'
-        f'<div class="summary-card-header">매수 / 매도 전략</div>'
+        f'<div class="summary-card-header">투자자 진입(A/B) 및 매도 전략</div>'
         f'<div class="summary-card-body">'
         f'<div class="strat-box-buy">'
-        f'<span class="strat-badge" style="background-color:#16A34A;">매수 지점</span><br>'
+        f'<span class="strat-badge" style="background-color:#16A34A;">진입시점 (A 돌파 / B 눌림목)</span><br>'
         f'<span style="color:#15803D; font-weight:700;">✔</span> {panel["buy1"]}<br>'
         f'<span style="color:#15803D; font-weight:700;">✔</span> {panel["buy2"]}'
         f"</div>"
@@ -764,11 +1064,13 @@ def render_summary_panel_html(panel):
         f"</div>"
         f"</div>"
         f'<div class="summary-card">'
-        f'<div class="summary-card-header">손절 기준</div>'
+        f'<div class="summary-card-header">트레일링 스탑 기준</div>'
         f'<div class="summary-card-body">'
-        f'<div class="stop-center">'
-        f'<div style="font-size:1.5rem; margin-bottom:4px;">⚠️</div>'
-        f"<div>{stop_html}</div>"
+        f'<div class="stop-box">'
+        f'<div style="font-size:1.45rem;">⚠️</div>'
+        f'<div style="color:#B91C1C; font-size:0.96rem;">{panel["stop_price_str"]}</div>'
+        f'<div style="font-size:0.78rem; color:#334155;">{panel["stop_mode_str"]}</div>'
+        f'<div style="font-size:0.78rem; color:#1E3A8A;">{panel["stop_status_str"]}</div>'
         f"</div>"
         f"</div>"
         f"</div>"
@@ -783,9 +1085,14 @@ def render_summary_panel_html(panel):
     )
 
 
-def build_full_download_image(data, company_name, code, panel):
-    """최근 1년치 차트(200일선 기준 Stage 음영 및 표기) + 4단 요약 패널을 합친 PNG를 생성합니다."""
+def build_full_download_image(data, company_name, code, panel, ab_info=None, stop_info=None):
+    """최근 1년치 차트(200일선 기준 Stage 음영·표기·A/B 진입시점·트레일링 스탑) + 4단 요약 패널을 합친 PNG를 생성합니다."""
     view_data = slice_recent_1y(data)
+    if ab_info is None:
+        ab_info = detect_investor_ab_points(data)
+    if stop_info is None:
+        stop_info = compute_trailing_stop_200ma(data, ab_info)
+
     fig = plt.figure(figsize=(18, 12.2), dpi=150, facecolor="#FFFFFF")
 
     top_ax = fig.add_axes([0.015, 0.94, 0.97, 0.045])
@@ -795,7 +1102,7 @@ def build_full_download_image(data, company_name, code, panel):
     top_ax.text(
         0.0,
         0.5,
-        f"{company_name} ({code}) | 현재 {last_stage} (200일선 기준) | 종가 {last_close:,.0f}원 (최근 1년)",
+        f"{company_name} ({code}) | 현재 {last_stage} | 종가 {last_close:,.0f}원 | 진입 A/B & 트레일링 스탑",
         fontsize=14,
         fontweight="bold",
         color="#1E3A8A",
@@ -871,6 +1178,72 @@ def build_full_download_image(data, company_name, code, panel):
     ax1.vlines(dates[~up], closes[~up], opens[~up], color="#E45B63", lw=2.0, zorder=3)
     ax1.plot(dates, view_data["MA200"], color="#FF334D", lw=2.2, label="200일선 (기준)", zorder=4)
     ax1.plot(dates, view_data["MA50"], color="#2474FF", lw=1.6, label="50일선 (참고)", zorder=4)
+
+    stop_series = stop_info.get("stop_series")
+    if stop_series is not None and not stop_series.empty:
+        ax1.plot(
+            stop_series.index,
+            stop_series.values,
+            color="#D97706",
+            lw=1.7,
+            ls="--",
+            label="트레일링 스탑",
+            zorder=4,
+        )
+
+    a_pt = ab_info.get("a_point")
+    b_pt = ab_info.get("b_point")
+    stop_event = stop_info.get("stop_event")
+    y_span = max(y_top - y_bot, 1.0)
+
+    if a_pt is not None:
+        ay = a_pt["low"] - y_span * 0.02
+        ax1.scatter([a_pt["date"]], [ay], marker="^", s=95, color="#059669", edgecolors="#FFFFFF", linewidths=0.8, zorder=6)
+        ax1.text(
+            a_pt["date"],
+            ay - y_span * 0.015,
+            "A(돌파)",
+            ha="center",
+            va="top",
+            fontsize=8.5,
+            fontweight="bold",
+            color="#065F46",
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="#DCFCE7", edgecolor="#059669", lw=0.8),
+            zorder=6,
+        )
+
+    if b_pt is not None:
+        by = b_pt["low"] - y_span * 0.02
+        ax1.scatter([b_pt["date"]], [by], marker="D", s=70, color="#0284C7", edgecolors="#FFFFFF", linewidths=0.8, zorder=6)
+        ax1.text(
+            b_pt["date"],
+            by - y_span * 0.015,
+            "B(눌림목)",
+            ha="center",
+            va="top",
+            fontsize=8.5,
+            fontweight="bold",
+            color="#075985",
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="#E0F2FE", edgecolor="#0284C7", lw=0.8),
+            zorder=6,
+        )
+
+    if stop_event is not None:
+        sy = stop_event["price"] + y_span * 0.025
+        ax1.scatter([stop_event["date"]], [sy], marker="X", s=85, color="#DC2626", edgecolors="#FFFFFF", linewidths=0.8, zorder=6)
+        ax1.text(
+            stop_event["date"],
+            sy + y_span * 0.015,
+            "STOP",
+            ha="center",
+            va="bottom",
+            fontsize=8.5,
+            fontweight="bold",
+            color="#991B1B",
+            bbox=dict(boxstyle="round,pad=0.18", facecolor="#FEE2E2", edgecolor="#DC2626", lw=0.8),
+            zorder=6,
+        )
+
     ax1.set_ylabel("가격 (원)", fontsize=9.5, color="#1E293B")
     ax1.legend(loc="upper left", frameon=True, facecolor="#FFFFFF", edgecolor="#CBD5E1")
 
@@ -884,8 +1257,8 @@ def build_full_download_image(data, company_name, code, panel):
 
     cards = [
         (0.015, 0.275, "단계별 구간 및 근거"),
-        (0.298, 0.255, "매수 / 매도 전략"),
-        (0.561, 0.175, "손절 기준"),
+        (0.298, 0.255, "투자자 진입(A/B) 및 매도 전략"),
+        (0.561, 0.175, "트레일링 스탑 기준"),
         (0.744, 0.241, "종합 결론"),
     ]
     for x0, w, title in cards:
@@ -949,13 +1322,13 @@ def build_full_download_image(data, company_name, code, panel):
                 )
                 y -= 0.125
 
-        elif title == "매수 / 매도 전략":
+        elif title == "투자자 진입(A/B) 및 매도 전략":
             cax.text(
                 0.04,
                 0.69,
-                " 매수 지점 ",
+                " 진입시점 (A 돌파 / B 눌림목) ",
                 color="#FFFFFF",
-                fontsize=8,
+                fontsize=7.8,
                 fontweight="bold",
                 va="center",
                 bbox=dict(boxstyle="round,pad=0.2", fc="#16A34A", ec="none"),
@@ -966,7 +1339,7 @@ def build_full_download_image(data, company_name, code, panel):
                 0.56,
                 f"✔ {panel['buy1']}",
                 color="#1E293B",
-                fontsize=8,
+                fontsize=7.8,
                 va="center",
                 transform=cax.transAxes,
             )
@@ -975,7 +1348,7 @@ def build_full_download_image(data, company_name, code, panel):
                 0.44,
                 f"✔ {panel['buy2']}",
                 color="#1E293B",
-                fontsize=8,
+                fontsize=7.8,
                 va="center",
                 transform=cax.transAxes,
             )
@@ -1010,13 +1383,13 @@ def build_full_download_image(data, company_name, code, panel):
                 transform=cax.transAxes,
             )
 
-        elif title == "손절 기준":
+        elif title == "트레일링 스탑 기준":
             cax.text(
                 0.5,
-                0.42,
+                0.44,
                 f"⚠️\n{panel['stop_text']}",
                 color="#1E293B",
-                fontsize=9.5,
+                fontsize=8.5,
                 fontweight="bold",
                 ha="center",
                 va="center",
@@ -1104,6 +1477,8 @@ def _generate_results(names, years):
             continue
 
         analyzed = prepare_analyzed_data(price, benchmark)
+        ab_info = detect_investor_ab_points(analyzed)
+        stop_info = compute_trailing_stop_200ma(analyzed, ab_info)
         last_row = analyzed.iloc[-1]
         summary = {
             "stage": str(last_row["Stage"]),
@@ -1112,9 +1487,9 @@ def _generate_results(names, years):
             "ma50": f'{last_row["MA50"]:,.0f}' if pd.notna(last_row["MA50"]) else "계산 중",
             "rs": f'{last_row["MansfieldRS"]:.1f}' if pd.notna(last_row["MansfieldRS"]) else "계산 중",
         }
-        fig = build_chart(analyzed, company, code)
-        panel = make_summary_panel_data(analyzed, summary)
-        full_png = build_full_download_image(analyzed, company, code, panel)
+        fig = build_chart(analyzed, company, code, ab_info=ab_info, stop_info=stop_info)
+        panel = make_summary_panel_data(analyzed, summary, ab_info=ab_info, stop_info=stop_info)
+        full_png = build_full_download_image(analyzed, company, code, panel, ab_info=ab_info, stop_info=stop_info)
         csv_bytes = analyzed.to_csv(encoding="utf-8-sig").encode("utf-8-sig")
 
         results.append(
@@ -1137,8 +1512,8 @@ def _generate_results(names, years):
 
 def render():
     _apply_bright_style()
-    st.title("스탠 와인스타인 4단계 주식 분석기 (TraderLion + 200일선 기준)")
-    st.caption("TraderLion Stage Analysis 원칙 + 200일선 기준 4단계 판정 | 최근 1년 차트 표시 | 다운로드 시 화면 유지")
+    st.title("스탠 와인스타인 4단계 주식 분석기 (200일선 + 진입 A/B + 트레일링 스탑)")
+    st.caption("TraderLion + 200일선 기준 4단계 | 투자자 A(돌파)/B(눌림목) | 이익 보호형 트레일링 스탑 | 다운로드 시 화면 유지")
 
     st.markdown(
         """
@@ -1148,6 +1523,17 @@ def render():
 • <b>Stage 2 (Advancing / 상승 추세):</b> 저항 돌파 및 200일선 우상향·상방 안착과 함께 본격 상승 추세가 이어지는 구간입니다.<br>
 • <b>Stage 3 (Distribution / 고점 분배):</b> 고점권에서 상승 모멘텀이 둔화되고 변동성·횡보(churning) 및 200일선 기울기 둔화가 나타나는 구간입니다.<br>
 • <b>Stage 4 (Declining / 하락 추세):</b> 지지선과 200일선을 하향 이탈하며 저점·고점이 낮아지는 하락 추세 구간입니다.
+</div>
+<div class="investor-guide-box">
+<b>🎯 투자자(Investor, 6~12개월 투자) 진입시점 — Stage 2 초기 (200일선 기준)</b><br>
+• <b>돌파(Breakout) A에 진입:</b> 베이스 상단 저항을 돌파하며 200일선 부근/상방 안착 및 거래량 동반이 확인되는 지점(<b>A</b>)에서 진입합니다.<br>
+• <b>눌림목(Pullback) B에 추가 진입:</b> 돌파 이후 200일선·돌파선 지지 테스트 및 재반등 확인 시점(<b>B</b>)에서 추가 매수를 고려합니다.
+</div>
+<div class="trailing-guide-box">
+<b>🛡️ 트레일링 스탑 (이익 보호형 매도 전략 — 200일선 적용)</b><br>
+• <b>초기 손절선 설정:</b> 베이스 하단/돌파 직전 저점 아래에 초기 손절선을 둡니다.<br>
+• <b>조정 후 반등 회복 시 손절선 상향:</b> 조정이 멈추고 반등이 이전 하락분을 회복해 추세가 살아난 것을 확인한 뒤, 손절선을 <b>200일선 아래</b>로 올려 잡습니다.<br>
+• <b>Stage 3 진입 시 공격적 대응:</b> 200일선이 평평해지며 Stage 3 신호가 나타나면 최근 조정 저점 쪽으로 손절선을 바짝 올려 이익을 지키고, 이탈 시(<b>STOP</b> / <b>Stage 4</b>) 매도로 대응합니다.
 </div>
 """,
         unsafe_allow_html=True,
@@ -1240,5 +1626,5 @@ def render():
     st.markdown("---")
     st.caption(
         "면책: 본 프로그램은 공개 가격 데이터와 200일선 기반 규칙을 이용한 교육·참고용 도구입니다. "
-        "단계 분류는 자동화된 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
+        "단계 분류, A/B 진입시점 및 트레일링 스탑 신호는 자동화된 규칙 기반 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
     )
