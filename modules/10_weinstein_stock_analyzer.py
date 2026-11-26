@@ -2,6 +2,7 @@
 """
 스탠 와인스타인 4단계 주식 분석기
 - 기존 Plotly 차트 방식 유지
+- 차트 및 다운로드 이미지는 최근 1년치 표시 (이동평균/단계/RS는 전체 기간 기준으로 산출)
 - 차트 하단에 4단 요약 패널(단계별 구간 및 근거 / 매수·매도 전략 / 손절 기준 / 종합 결론) 추가
 - 전체 결과 PNG 이미지 및 CSV 다운로드 지원
 """
@@ -290,6 +291,33 @@ STAGE_STYLE = {
 }
 
 
+def prepare_analyzed_data(df, benchmark):
+    """전체 기간 데이터를 기준으로 지표·단계·Mansfield RS를 계산합니다."""
+    data = df.copy()
+    data["MA50"] = data["Close"].rolling(50).mean()
+    data["MA200"] = data["Close"].rolling(200).mean()
+    data["Stage"] = classify_stages(data)
+
+    if not benchmark.empty and "Close" in benchmark.columns:
+        bench_close = benchmark["Close"].reindex(data.index).ffill()
+        rel = data["Close"].div(bench_close)
+        rs_base = rel.rolling(252, min_periods=60).mean()
+        data["MansfieldRS"] = ((rel / rs_base) - 1) * 100
+    else:
+        data["MansfieldRS"] = np.nan
+
+    return data
+
+
+def slice_recent_1y(data):
+    """최근 1년치 데이터만 추출합니다."""
+    if data.empty:
+        return data
+    cutoff = data.index[-1] - pd.Timedelta(days=365)
+    sliced = data.loc[data.index >= cutoff]
+    return sliced if not sliced.empty else data
+
+
 def add_stage_shading(fig, df):
     stage = df["Stage"]
     if stage.empty:
@@ -303,7 +331,7 @@ def add_stage_shading(fig, df):
             if color:
                 fig.add_vrect(
                     x0=start,
-                    x1=current != "데이터 축적 중" and end or end,
+                    x1=end,
                     fillcolor=color,
                     opacity=1,
                     line_width=0,
@@ -341,18 +369,9 @@ def _get_segments(stage_series):
     return segs
 
 
-def build_chart(df, benchmark, company_name, code):
-    data = df.copy()
-    data["MA50"] = data["Close"].rolling(50).mean()
-    data["MA200"] = data["Close"].rolling(200).mean()
-    data["Stage"] = classify_stages(data)
-
-    if not benchmark.empty and "Close" in benchmark.columns:
-        rel = data["Close"].div(benchmark["Close"].reindex(data.index).ffill())
-        rs_base = rel.rolling(252, min_periods=100).mean()
-        data["MansfieldRS"] = ((rel / rs_base) - 1) * 100
-    else:
-        data["MansfieldRS"] = float("nan")
+def build_chart(data, company_name, code):
+    """최근 1년치 기준으로 Plotly 차트를 생성합니다."""
+    view_data = slice_recent_1y(data)
 
     fig = make_subplots(
         rows=3,
@@ -360,15 +379,19 @@ def build_chart(df, benchmark, company_name, code):
         shared_xaxes=True,
         vertical_spacing=0.035,
         row_heights=[0.62, 0.17, 0.21],
-        subplot_titles=("주가 · 50일선 · 200일선", "거래량", "Mansfield 상대강도 (KOSPI 대비)"),
+        subplot_titles=(
+            "주가 · 50일선 · 200일선 (최근 1년)",
+            "거래량",
+            "Mansfield 상대강도 (KOSPI 대비)",
+        ),
     )
     fig.add_trace(
         go.Candlestick(
-            x=data.index,
-            open=data["Open"],
-            high=data["High"],
-            low=data["Low"],
-            close=data["Close"],
+            x=view_data.index,
+            open=view_data["Open"],
+            high=view_data["High"],
+            low=view_data["Low"],
+            close=view_data["Close"],
             name="주가",
             increasing_line_color="#16a6a0",
             decreasing_line_color="#e45b63",
@@ -378,8 +401,8 @@ def build_chart(df, benchmark, company_name, code):
     )
     fig.add_trace(
         go.Scatter(
-            x=data.index,
-            y=data["MA50"],
+            x=view_data.index,
+            y=view_data["MA50"],
             name="50일선",
             line=dict(color="#2474ff", width=1.8),
         ),
@@ -388,8 +411,8 @@ def build_chart(df, benchmark, company_name, code):
     )
     fig.add_trace(
         go.Scatter(
-            x=data.index,
-            y=data["MA200"],
+            x=view_data.index,
+            y=view_data["MA200"],
             name="200일선",
             line=dict(color="#ff334d", width=2),
         ),
@@ -399,12 +422,12 @@ def build_chart(df, benchmark, company_name, code):
 
     vol_colors = [
         "#16a6a0" if c >= o else "#e45b63"
-        for c, o in zip(data["Close"], data["Open"])
+        for c, o in zip(view_data["Close"], view_data["Open"])
     ]
     fig.add_trace(
         go.Bar(
-            x=data.index,
-            y=data["Volume"],
+            x=view_data.index,
+            y=view_data["Volume"],
             name="거래량",
             marker_color=vol_colors,
         ),
@@ -414,8 +437,8 @@ def build_chart(df, benchmark, company_name, code):
 
     fig.add_trace(
         go.Scatter(
-            x=data.index,
-            y=data["MansfieldRS"],
+            x=view_data.index,
+            y=view_data["MansfieldRS"],
             name="Mansfield RS",
             line=dict(color="#333333", width=1.3),
         ),
@@ -424,7 +447,7 @@ def build_chart(df, benchmark, company_name, code):
     )
     fig.add_hline(y=0, line_dash="dash", line_color="#246bff", row=3, col=1)
 
-    add_stage_shading(fig, data)
+    add_stage_shading(fig, view_data)
 
     last = data.iloc[-1]
     stage_text = last["Stage"]
@@ -433,7 +456,7 @@ def build_chart(df, benchmark, company_name, code):
     rs_text = f'{last["MansfieldRS"]:.1f}' if pd.notna(last["MansfieldRS"]) else "계산 중"
 
     fig.update_layout(
-        title=f"{company_name} ({code}) | 현재 {stage_text} | 종가 {last['Close']:,.0f}원",
+        title=f"{company_name} ({code}) | 현재 {stage_text} | 종가 {last['Close']:,.0f}원 (최근 1년)",
         height=820,
         plot_bgcolor="#FFFFFF",
         paper_bgcolor="#FFFFFF",
@@ -449,7 +472,7 @@ def build_chart(df, benchmark, company_name, code):
     fig.update_yaxes(title_text="거래량", row=2, col=1)
     fig.update_yaxes(title_text="RS (%)", row=3, col=1)
 
-    return fig, data, {
+    return fig, {
         "stage": stage_text,
         "close": float(last["Close"]),
         "ma50": ma50_text,
@@ -459,14 +482,15 @@ def build_chart(df, benchmark, company_name, code):
 
 
 def make_summary_panel_data(data, summary):
-    """첨부된 4단 요약 패널 구성을 위한 데이터를 생성합니다."""
+    """최근 1년 구간 및 최신 기준가 기반 4단 요약 패널 데이터를 생성합니다."""
     last = data.iloc[-1]
     close = float(last["Close"])
     ma50 = float(last["MA50"]) if pd.notna(last["MA50"]) else close
     ma200 = float(last["MA200"]) if pd.notna(last["MA200"]) else close
     stage = summary["stage"]
 
-    segs = [s for s in _get_segments(data["Stage"]) if s[2] in STAGE_STYLE]
+    view_data = slice_recent_1y(data)
+    segs = [s for s in _get_segments(view_data["Stage"]) if s[2] in STAGE_STYLE]
     stage_items = []
     seen = {}
     for idx_s, (dt0, dt1, stg) in enumerate(segs[-6:], start=1):
@@ -474,9 +498,9 @@ def make_summary_panel_data(data, summary):
         seen[stg] = seen.get(stg, 0) + 1
         desc = meta["desc"] if seen[stg] == 1 else meta["redesc"]
         if idx_s == len(segs[-6:]):
-            period_str = f"{dt0.strftime('%Y년')} ~ 현재"
+            period_str = f"{dt0.strftime('%Y.%m')} ~ 현재"
         else:
-            period_str = f"{dt0.strftime('%Y년')} ~ {dt1.strftime('%Y년')}"
+            period_str = f"{dt0.strftime('%Y.%m')} ~ {dt1.strftime('%Y.%m')}"
         stage_items.append(
             {
                 "stage": stg,
@@ -590,11 +614,11 @@ def render_summary_panel_html(panel):
     """
 
 
-def build_full_download_image(data, benchmark, company_name, code, panel):
-    """기존 차트 구성 + 첨부 4단 요약 패널을 합친 다운로드용 PNG 이미지를 생성합니다."""
+def build_full_download_image(data, company_name, code, panel):
+    """최근 1년치 차트 + 첨부 4단 요약 패널을 합친 다운로드용 PNG 이미지를 생성합니다."""
+    view_data = slice_recent_1y(data)
     fig = plt.figure(figsize=(18, 12.2), dpi=150, facecolor="#FFFFFF")
 
-    # 상단 헤더
     top_ax = fig.add_axes([0.015, 0.94, 0.97, 0.045])
     top_ax.axis("off")
     last_close = float(data["Close"].iloc[-1])
@@ -602,14 +626,13 @@ def build_full_download_image(data, benchmark, company_name, code, panel):
     top_ax.text(
         0.0,
         0.5,
-        f"{company_name} ({code}) | 현재 {last_stage} | 종가 {last_close:,.0f}원",
+        f"{company_name} ({code}) | 현재 {last_stage} | 종가 {last_close:,.0f}원 (최근 1년)",
         fontsize=14,
         fontweight="bold",
         color="#1E3A8A",
         va="center",
     )
 
-    # 차트 영역 (가격 / 거래량 / Mansfield RS)
     gs = fig.add_gridspec(
         nrows=3,
         ncols=1,
@@ -629,35 +652,34 @@ def build_full_download_image(data, benchmark, company_name, code, panel):
         ax.grid(True, linestyle=":", alpha=0.5, color="#CBD5E1")
         ax.tick_params(colors="#334155", labelsize=9)
 
-    for dt0, dt1, stg in _get_segments(data["Stage"]):
+    for dt0, dt1, stg in _get_segments(view_data["Stage"]):
         if stg in STAGE_STYLE:
             ax1.axvspan(dt0, dt1, color=STAGE_STYLE[stg]["row_bg"], alpha=0.85, zorder=0)
 
-    dates = data.index
-    opens = data["Open"].values
-    highs = data["High"].values
-    lows = data["Low"].values
-    closes = data["Close"].values
+    dates = view_data.index
+    opens = view_data["Open"].values
+    highs = view_data["High"].values
+    lows = view_data["Low"].values
+    closes = view_data["Close"].values
     up = closes >= opens
 
     ax1.vlines(dates[up], lows[up], highs[up], color="#16A6A0", lw=0.8, zorder=2)
     ax1.vlines(dates[up], opens[up], closes[up], color="#16A6A0", lw=2.0, zorder=3)
     ax1.vlines(dates[~up], lows[~up], highs[~up], color="#E45B63", lw=0.8, zorder=2)
     ax1.vlines(dates[~up], closes[~up], opens[~up], color="#E45B63", lw=2.0, zorder=3)
-    ax1.plot(dates, data["MA50"], color="#2474FF", lw=1.8, label="50일선", zorder=4)
-    ax1.plot(dates, data["MA200"], color="#FF334D", lw=2.0, label="200일선", zorder=4)
+    ax1.plot(dates, view_data["MA50"], color="#2474FF", lw=1.8, label="50일선", zorder=4)
+    ax1.plot(dates, view_data["MA200"], color="#FF334D", lw=2.0, label="200일선", zorder=4)
     ax1.set_ylabel("가격 (원)", fontsize=9.5, color="#1E293B")
     ax1.legend(loc="upper left", frameon=True, facecolor="#FFFFFF", edgecolor="#CBD5E1")
 
     vol_colors = np.where(up, "#16A6A0", "#E45B63")
-    ax2.bar(dates, data["Volume"].values, color=vol_colors, width=1.0, alpha=0.85)
+    ax2.bar(dates, view_data["Volume"].values, color=vol_colors, width=1.0, alpha=0.85)
     ax2.set_ylabel("거래량", fontsize=9.5, color="#1E293B")
 
-    ax3.plot(dates, data["MansfieldRS"], color="#333333", lw=1.3, label="Mansfield RS")
+    ax3.plot(dates, view_data["MansfieldRS"], color="#333333", lw=1.3, label="Mansfield RS")
     ax3.axhline(0, color="#246BFF", ls="--", lw=1.0)
     ax3.set_ylabel("RS (%)", fontsize=9.5, color="#1E293B")
 
-    # 하단 4단 요약 패널 (첨부 이미지와 동일한 4개 카드)
     cards = [
         (0.015, 0.275, "단계별 구간 및 근거"),
         (0.298, 0.255, "매수 / 매도 전략"),
@@ -727,12 +749,12 @@ def build_full_download_image(data, benchmark, company_name, code, panel):
 def render():
     _apply_bright_style()
     st.title("스탠 와인스타인 4단계 주식 분석기")
-    st.caption("50일선·200일선 기준 | 단계별 음영 | 거래량 | Mansfield 상대강도")
+    st.caption("50일선·200일선 기준 | 최근 1년 차트 표시 | 단계별 음영 | 거래량 | Mansfield 상대강도")
 
     with st.sidebar:
         st.header("분석 설정")
-        years = st.selectbox("조회 기간", [3, 5, 7, 10], index=1)
-        st.caption("일봉 데이터 기준이며 200일선 계산을 위해 최소 1년 이상의 데이터가 필요합니다.")
+        years = st.selectbox("지표 산출용 조회 기간", [3, 5, 7, 10], index=1)
+        st.caption("200일선과 Mansfield RS를 안정적으로 계산하기 위해 과거 데이터를 함께 불러오며, 차트는 최근 1년치만 표시합니다.")
         st.markdown("---")
         st.caption("중복 기업명은 제거하지 않습니다. 같은 이름을 여러 줄에 입력하면 각각 분석합니다.")
 
@@ -779,11 +801,20 @@ def render():
                 st.error("가격 데이터를 가져오지 못했습니다.")
                 continue
 
-            fig, analyzed, summary = build_chart(price, benchmark, company, code)
+            analyzed = prepare_analyzed_data(price, benchmark)
+            last_row = analyzed.iloc[-1]
+            summary = {
+                "stage": str(last_row["Stage"]),
+                "close": float(last_row["Close"]),
+                "ma50": f'{last_row["MA50"]:,.0f}' if pd.notna(last_row["MA50"]) else "계산 중",
+                "ma200": f'{last_row["MA200"]:,.0f}' if pd.notna(last_row["MA200"]) else "계산 중",
+                "rs": f'{last_row["MansfieldRS"]:.1f}' if pd.notna(last_row["MansfieldRS"]) else "계산 중",
+            }
+            fig, _ = build_chart(analyzed, company, code)
             panel = make_summary_panel_data(analyzed, summary)
-            full_png = build_full_download_image(analyzed, benchmark, company, code, panel)
+            full_png = build_full_download_image(analyzed, company, code, panel)
 
-            # 1) 기존 Plotly 차트 출력
+            # 1) 최근 1년치 Plotly 차트 출력
             st.plotly_chart(fig, use_container_width=True)
 
             # 2) 첨부 이미지의 4단 요약 패널 출력
@@ -796,7 +827,7 @@ def render():
                 st.download_button(
                     f"🖼️ {idx}번 {company} 전체 결과 이미지(PNG) 다운로드",
                     data=full_png,
-                    file_name=f"{idx:02d}_{safe}_{code}_weinstein.png",
+                    file_name=f"{idx:02d}_{safe}_{code}_weinstein_1y.png",
                     mime="image/png",
                     key=f"png_{idx}_{code}",
                     use_container_width=True,
