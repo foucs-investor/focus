@@ -6,8 +6,8 @@
 - 투자자(6~12개월) Stage 2 초기 진입시점: 돌파(Breakout) A 및 눌림목(Pullback) B
 - 이익 보호형 트레일링 스탑(Trailing Stop): 초기 손절선, 반등 확인 후 상향, Stage 3 타이트 상향, Stage 4 이탈 신호
 - Stage 1 -> Stage 3 직행 차단 및 인접 사이클 흐름 유지
-- 구간 폭이 좁아 라벨이 겹칠 경우 단계 숫자(1, 2, 3, 4)만 표기
-- 최근 1년 차트 표시 + Stage별 밝은 음영 + 다운로드 시 화면 유지
+- 차트에는 Stage 2와 Stage 4만 표기 (구간 폭이 좁을 경우 숫자 2, 4만 표기)
+- 최근 1년 차트 표시 + Stage 2/4 밝은 음영 + 다운로드 시 화면 유지
 """
 
 from datetime import date, timedelta
@@ -27,6 +27,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 
 MENU_NAME = "와인스타인 4단계 분석"
+CHART_DISPLAY_STAGES = {"Stage 2", "Stage 4"}
 
 
 def _configure_korean_font():
@@ -684,7 +685,7 @@ def _get_segments(stage_series):
 
 def _format_stage_label(stg, style, seg_days, total_days):
     """
-    구간 폭이 좁아 라벨이 겹칠 경우 단계 숫자('1', '2', '3', '4')만 표기하고,
+    구간 폭이 좁아 라벨이 겹칠 경우 단계 숫자('2', '4')만 표기하고,
     충분히 넓은 구간에서는 'Stage X (설명)' 형태로 표기합니다.
     """
     ratio = seg_days / max(total_days, 1)
@@ -694,13 +695,16 @@ def _format_stage_label(stg, style, seg_days, total_days):
 
 
 def add_stage_shading_and_labels(fig, df):
-    """Plotly 차트에 Stage별 밝은 음영과 구간별 Stage 표기(겹침 시 숫자만)를 추가합니다."""
+    """Plotly 차트에 Stage 2와 Stage 4의 음영 및 구간 표기(겹침 시 숫자 2, 4만)만 추가합니다."""
     y_max = float(df["High"].max()) if not df.empty else 0.0
     y_min = float(df["Low"].min()) if not df.empty else 0.0
     label_y = y_max - (y_max - y_min) * 0.04 if y_max > y_min else y_max
     total_days = max((df.index[-1] - df.index[0]).days, 1) if len(df) >= 2 else 1
 
     for dt0, dt1, stg in _get_segments(df["Stage"]):
+        if stg not in CHART_DISPLAY_STAGES:
+            continue
+
         color = STAGE_BRIGHT_COLORS.get(stg)
         style = STAGE_STYLE.get(stg)
         if color:
@@ -823,7 +827,7 @@ def add_investor_ab_and_stop_plotly(fig, ab_info, stop_info):
 
 
 def build_chart(data, company_name, code, ab_info=None, stop_info=None):
-    """최근 1년치 기준으로 Stage 음영·표기, A/B 진입시점, 트레일링 스탑을 포함한 Plotly 차트를 생성합니다."""
+    """최근 1년치 기준으로 Stage 2·4 음영·표기, A/B 진입시점, 트레일링 스탑을 포함한 Plotly 차트를 생성합니다."""
     view_data = slice_recent_1y(data)
     if ab_info is None:
         ab_info = detect_investor_ab_points(data)
@@ -837,7 +841,7 @@ def build_chart(data, company_name, code, ab_info=None, stop_info=None):
         vertical_spacing=0.035,
         row_heights=[0.62, 0.17, 0.21],
         subplot_titles=(
-            "주가 · 200일선(기준) · 50일선 + A(돌파)/B(눌림목) + 트레일링 스탑",
+            "주가 · 200일선(기준) · 50일선 + A(돌파)/B(눌림목) + 트레일링 스탑 (차트 표기: Stage 2 · 4)",
             "거래량",
             "Mansfield 상대강도 (KOSPI 대비)",
         ),
@@ -1086,7 +1090,7 @@ def render_summary_panel_html(panel):
 
 
 def build_full_download_image(data, company_name, code, panel, ab_info=None, stop_info=None):
-    """최근 1년치 차트(200일선 기준 Stage 음영·표기·A/B 진입시점·트레일링 스탑) + 4단 요약 패널을 합친 PNG를 생성합니다."""
+    """최근 1년치 차트(Stage 2·4 음영·표기·A/B 진입시점·트레일링 스탑) + 4단 요약 패널을 합친 PNG를 생성합니다."""
     view_data = slice_recent_1y(data)
     if ab_info is None:
         ab_info = detect_investor_ab_points(data)
@@ -1134,7 +1138,7 @@ def build_full_download_image(data, company_name, code, panel, ab_info=None, sto
     total_days = max((view_data.index[-1] - view_data.index[0]).days, 1) if len(view_data) >= 2 else 1
 
     for dt0, dt1, stg in _get_segments(view_data["Stage"]):
-        if stg in STAGE_STYLE:
+        if stg in CHART_DISPLAY_STAGES and stg in STAGE_STYLE:
             st_info = STAGE_STYLE[stg]
             bg = st_info["mpl_bg"]
             ax1.axvspan(dt0, dt1, color=bg, alpha=0.75, zorder=0)
@@ -1513,16 +1517,16 @@ def _generate_results(names, years):
 def render():
     _apply_bright_style()
     st.title("스탠 와인스타인 4단계 주식 분석기 (200일선 + 진입 A/B + 트레일링 스탑)")
-    st.caption("TraderLion + 200일선 기준 4단계 | 투자자 A(돌파)/B(눌림목) | 이익 보호형 트레일링 스탑 | 다운로드 시 화면 유지")
+    st.caption("TraderLion + 200일선 기준 4단계 | 차트 표기: Stage 2 · Stage 4 | 투자자 A(돌파)/B(눌림목) | 이익 보호형 트레일링 스탑")
 
     st.markdown(
         """
 <div class="cycle-guide-box">
 <b>📌 TraderLion 기준 + 200일선 주가 사이클 4단계 요약</b><br>
 • <b>Stage 1 (Base / 기초 다지기):</b> 하락세 진정 후 횡보하며 바닥을 다지는 구간으로, 200일선이 평평해지고 물량 매집이 이루어집니다.<br>
-• <b>Stage 2 (Advancing / 상승 추세):</b> 저항 돌파 및 200일선 우상향·상방 안착과 함께 본격 상승 추세가 이어지는 구간입니다.<br>
+• <b>Stage 2 (Advancing / 상승 추세):</b> 저항 돌파 및 200일선 우상향·상방 안착과 함께 본격 상승 추세가 이어지는 구간입니다. <i>(차트 표기)</i><br>
 • <b>Stage 3 (Distribution / 고점 분배):</b> 고점권에서 상승 모멘텀이 둔화되고 변동성·횡보(churning) 및 200일선 기울기 둔화가 나타나는 구간입니다.<br>
-• <b>Stage 4 (Declining / 하락 추세):</b> 지지선과 200일선을 하향 이탈하며 저점·고점이 낮아지는 하락 추세 구간입니다.
+• <b>Stage 4 (Declining / 하락 추세):</b> 지지선과 200일선을 하향 이탈하며 저점·고점이 낮아지는 하락 추세 구간입니다. <i>(차트 표기)</i>
 </div>
 <div class="investor-guide-box">
 <b>🎯 투자자(Investor, 6~12개월 투자) 진입시점 — Stage 2 초기 (200일선 기준)</b><br>
