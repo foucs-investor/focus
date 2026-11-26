@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-스탠 와인스타인 4단계 주식 분석기
-- 기존 Plotly 차트 방식 유지 + Stage별 밝은 색 음영 및 구간별 Stage 라벨 표기
-- 차트 및 다운로드 이미지는 최근 1년치 표시 (이동평균/단계/RS는 전체 기간 기준으로 산출)
-- 차트 하단에 4단 요약 패널(단계별 구간 및 근거 / 매수·매도 전략 / 손절 기준 / 종합 결론) 추가
-- 전체 결과 PNG 이미지 및 CSV 다운로드 지원
+스탠 와인스타인 4단계 주식 분석기 (200일선 기준)
+- 200일선 위치 및 기울기 기준 Stage 1~4 판정 (1단계 베이스 / 2단계 업트렌드 / 3단계 탑 / 4단계 다운트렌드)
+- 최근 1년 차트 표시 + Stage별 밝은 음영 및 Stage 표기
+- 차트 하단 4단 요약 패널 + PNG / CSV 다운로드
+- st.session_state 활용으로 다운로드 클릭 시에도 화면 결과 유지
 """
 
 from datetime import date, timedelta
@@ -82,6 +82,15 @@ def _apply_bright_style():
     background-color: #FFFFFF !important;
     color: #1E293B !important;
     border-color: #CBD5E1 !important;
+}
+.cycle-guide-box {
+    background-color: #FFFFFF;
+    border: 1px solid #CBD5E1;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 14px;
+    font-size: 0.88rem;
+    line-height: 1.5;
 }
 .summary-grid {
     display: grid;
@@ -233,19 +242,37 @@ def resolve_company(name, listing):
     return None
 
 
-def classify_stages(df):
-    """50일선/200일선 및 200일선 기울기 기반 일봉 참고 단계 판정."""
+def classify_stages_200ma(df):
+    """
+    200일 이동평균선(200일선) 기준 주가 사이클 4단계 판정:
+    - Stage 2 (상승 국면 / 업트렌드): 200일선이 우상향하고 주가가 200일선 위에서 추세 유지/돌파
+    - Stage 4 (쇠퇴 국면 / 다운트렌드): 200일선이 하락세이고 주가가 200일선 아래에서 하락
+    - Stage 3 (최정상 지역 / 탑): 상승 이후 200일선 기울기가 둔화·평평해지고 고점권 박스/조정 진입
+    - Stage 1 (기초 지역 / 베이스): 하락 이후 200일선 하락이 멈추고 평평해지며 바닥을 다지는 횡보 구간
+    """
     close = df["Close"]
-    ma50 = df["MA50"]
     ma200 = df["MA200"]
-    slope = ma200.diff(20) / ma200.shift(20)
-    distance = (close / ma200) - 1
+    # 약 1개월(20거래일) 기준 200일선 기울기 변화율
+    slope200 = ma200.diff(20) / ma200.shift(20)
+    # 최근 60거래일 고점 대비 현재가 위치
+    high60 = close.rolling(60, min_periods=20).max()
+    near_top = close >= high60 * 0.93
 
-    s2 = (close > ma200) & (ma50 > ma200) & (slope > 0.01)
-    s4 = (close < ma200) & (ma50 < ma200) & (slope < -0.01)
-    s3 = ((ma50 > ma200) & (close < ma50) & (distance > -0.12)) | (
-        (close < ma200) & (ma50 >= ma200) & (slope >= -0.01)
+    # 2단계: 200일선 상승(기울기 > +0.8%) & 주가가 200일선 위
+    s2 = (close > ma200) & (slope200 > 0.008)
+
+    # 4단계: 200일선 하락(기울기 < -0.8%) & 주가가 200일선 아래
+    s4 = (close < ma200) & (slope200 < -0.008)
+
+    # 3단계: 주가가 200일선 위이거나 근접한 상태에서 200일선 기울기가 둔화/평평해지며 고점권 형성
+    s3 = (
+        (~s2)
+        & (close >= ma200 * 0.97)
+        & (slope200.abs() <= 0.008)
+        & near_top
     )
+
+    # 1단계: 나머지 중 200일선 하락이 멈추고 평평해지거나 바닥권 횡보/재진입 구간
     s1 = ~(s2 | s3 | s4)
 
     stage = pd.Series("Stage 1", index=df.index, dtype="object")
@@ -268,43 +295,43 @@ STAGE_STYLE = {
         "pill_bg": "#2563EB",
         "row_bg": "#EFF6FF",
         "mpl_bg": "#DBEAFE",
-        "short": "바닥 형성",
-        "desc": "50일선 횡보, 바닥 형성",
-        "redesc": "저점권 횡보",
+        "short": "1단계·베이스",
+        "desc": "200일선 평평화, 바닥 횡보·물량 매집",
+        "redesc": "200일선 평평화, 재바닥 횡보",
     },
     "Stage 2": {
         "pill_bg": "#16A34A",
         "row_bg": "#F0FDF4",
         "mpl_bg": "#DCFCE7",
-        "short": "상승 추세",
-        "desc": "50일선 상승, 200일선 돌파",
-        "redesc": "50일선 상승, 200일선 돌파",
+        "short": "2단계·업트렌드",
+        "desc": "200일선 우상향·돌파, 본격 상승 추세",
+        "redesc": "200일선 우상향, 상승 추세 지속",
     },
     "Stage 3": {
         "pill_bg": "#CA8A04",
         "row_bg": "#FEFCE8",
         "mpl_bg": "#FEF9C3",
-        "short": "상승 시도",
-        "desc": "50일선 상승 시도, 200일선 접근",
-        "redesc": "50일선 상승 시도, 200일선 접근",
+        "short": "3단계·탑",
+        "desc": "200일선 기울기 둔화, 고점권 횡보·모멘텀 약화",
+        "redesc": "200일선 평평화, 고점권 박스·분배 점검",
     },
     "Stage 4": {
         "pill_bg": "#DC2626",
         "row_bg": "#FEF2F2",
         "mpl_bg": "#FEE2E2",
-        "short": "하락 추세",
-        "desc": "고점·저점 하락, 200일선 하락",
-        "redesc": "50일선 하락, 재하락",
+        "short": "4단계·다운트렌드",
+        "desc": "200일선 하락 전환·이탈, 본격 하락 추세",
+        "redesc": "200일선 하락세 지속, 하락 추세 주의",
     },
 }
 
 
 def prepare_analyzed_data(df, benchmark):
-    """전체 기간 데이터를 기준으로 지표·단계·Mansfield RS를 계산합니다."""
+    """전체 기간 데이터를 기준으로 200일선·50일선·Stage(200일선 기준)·Mansfield RS를 계산합니다."""
     data = df.copy()
     data["MA50"] = data["Close"].rolling(50).mean()
     data["MA200"] = data["Close"].rolling(200).mean()
-    data["Stage"] = classify_stages(data)
+    data["Stage"] = classify_stages_200ma(data)
 
     if not benchmark.empty and "Close" in benchmark.columns:
         bench_close = benchmark["Close"].reindex(data.index).ffill()
@@ -382,7 +409,6 @@ def add_stage_shading_and_labels(fig, df):
                 col=1,
             )
 
-        # 구간 길이가 너무 짧아 겹치지 않도록 최소 일수(약 7일) 이상인 구간에 Stage 라벨 표기
         if style and (dt1 - dt0).days >= 7:
             mid_dt = dt0 + (dt1 - dt0) / 2
             fig.add_annotation(
@@ -411,7 +437,7 @@ def build_chart(data, company_name, code):
         vertical_spacing=0.035,
         row_heights=[0.62, 0.17, 0.21],
         subplot_titles=(
-            "주가 · 50일선 · 200일선 (최근 1년 / Stage 구간 표기)",
+            "주가 · 200일선(핵심) · 50일선 (최근 1년 / 200일선 기준 Stage 표기)",
             "거래량",
             "Mansfield 상대강도 (KOSPI 대비)",
         ),
@@ -433,9 +459,9 @@ def build_chart(data, company_name, code):
     fig.add_trace(
         go.Scatter(
             x=view_data.index,
-            y=view_data["MA50"],
-            name="50일선",
-            line=dict(color="#2474ff", width=1.8),
+            y=view_data["MA200"],
+            name="200일선 (Stage 기준)",
+            line=dict(color="#ff334d", width=2.2),
         ),
         row=1,
         col=1,
@@ -443,9 +469,9 @@ def build_chart(data, company_name, code):
     fig.add_trace(
         go.Scatter(
             x=view_data.index,
-            y=view_data["MA200"],
-            name="200일선",
-            line=dict(color="#ff334d", width=2),
+            y=view_data["MA50"],
+            name="50일선 (참고)",
+            line=dict(color="#2474ff", width=1.6),
         ),
         row=1,
         col=1,
@@ -481,13 +507,10 @@ def build_chart(data, company_name, code):
     add_stage_shading_and_labels(fig, view_data)
 
     last = data.iloc[-1]
-    stage_text = last["Stage"]
-    ma50_text = f'{last["MA50"]:,.0f}' if pd.notna(last["MA50"]) else "계산 중"
-    ma200_text = f'{last["MA200"]:,.0f}' if pd.notna(last["MA200"]) else "계산 중"
-    rs_text = f'{last["MansfieldRS"]:.1f}' if pd.notna(last["MansfieldRS"]) else "계산 중"
+    stage_text = str(last["Stage"])
 
     fig.update_layout(
-        title=f"{company_name} ({code}) | 현재 {stage_text} | 종가 {last['Close']:,.0f}원 (최근 1년)",
+        title=f"{company_name} ({code}) | 현재 {stage_text} (200일선 기준) | 종가 {last['Close']:,.0f}원",
         height=820,
         plot_bgcolor="#FFFFFF",
         paper_bgcolor="#FFFFFF",
@@ -503,20 +526,13 @@ def build_chart(data, company_name, code):
     fig.update_yaxes(title_text="거래량", row=2, col=1)
     fig.update_yaxes(title_text="RS (%)", row=3, col=1)
 
-    return fig, {
-        "stage": stage_text,
-        "close": float(last["Close"]),
-        "ma50": ma50_text,
-        "ma200": ma200_text,
-        "rs": rs_text,
-    }
+    return fig
 
 
 def make_summary_panel_data(data, summary):
-    """최근 1년 구간 및 최신 기준가 기반 4단 요약 패널 데이터를 생성합니다."""
+    """200일선 기준 최근 1년 구간 및 최신 기준가 기반 4단 요약 패널 데이터를 생성합니다."""
     last = data.iloc[-1]
     close = float(last["Close"])
-    ma50 = float(last["MA50"]) if pd.notna(last["MA50"]) else close
     ma200 = float(last["MA200"]) if pd.notna(last["MA200"]) else close
     stage = summary["stage"]
 
@@ -545,45 +561,45 @@ def make_summary_panel_data(data, summary):
     recent60 = data.tail(60)
     res_price = round(float(recent60["High"].max()), -2)
     sup_price = round(float(recent60["Low"].min()), -2)
-    buy1_low = round(min(close, ma50) * 0.96, -2)
-    buy1_high = round(max(close, ma50) * 1.02, -2)
-    buy2_price = round(ma50, -2)
+    buy1_low = round(min(close, ma200) * 0.98, -2)
+    buy1_high = round(max(close, ma200) * 1.02, -2)
+    buy2_price = round(ma200, -2)
     sell1_price = round(max(close * 1.08, res_price), -2)
     sell2_price = round(sell1_price * 1.12, -2)
-    stop_price = round(min(sup_price, ma200 * 0.97), -2)
+    stop_price = round(min(sup_price, ma200 * 0.96), -2)
 
     if stage == "Stage 2":
-        c_title = "Stage 2 전환 구간"
+        c_title = "2단계 상승 국면 (200일선 기준)"
         c_body = (
-            f"50일선이 200일선을 상향 돌파하며 상승 추세로 전환하는 구간입니다. "
-            f"{sell1_price:,.0f}원 돌파 여부가 추가 상승의 핵심입니다."
+            f"주가가 200일선({ma200:,.0f}원) 위에서 우상향 추세를 보이는 상승 국면입니다. "
+            f"{sell1_price:,.0f}원 부근 저항과 200일선 지지 여부를 점검하세요."
         )
     elif stage == "Stage 3":
-        c_title = "Stage 3 상승 시도 구간"
+        c_title = "3단계 최정상·고점 점검 구간"
         c_body = (
-            f"50일선 상승 시도 및 고점권 수급 점검 구간입니다. "
-            f"{sell1_price:,.0f}원 저항과 50일선({buy2_price:,.0f}원) 지지를 함께 확인하세요."
+            f"200일선({ma200:,.0f}원) 기울기가 둔화되며 고점권 횡보 흐름을 보이는 구간입니다. "
+            f"{sell1_price:,.0f}원 부근 저항과 추세 둔화 신호를 확인하세요."
         )
     elif stage == "Stage 4":
-        c_title = "Stage 4 하락 주의 구간"
+        c_title = "4단계 쇠퇴·하락 국면"
         c_body = (
-            f"추세 약화 및 재하락 점검 구간입니다. "
-            f"{stop_price:,.0f}원 이탈 여부와 이동평균선 추세 반전을 확인하세요."
+            f"주가가 200일선({ma200:,.0f}원) 아래에서 하락세로 돌아선 구간입니다. "
+            f"{stop_price:,.0f}원 이탈 여부 및 200일선 재돌파·평평화 여부를 확인하세요."
         )
     else:
-        c_title = "Stage 1 바닥 형성 구간"
+        c_title = "1단계 기초·베이스 구간"
         c_body = (
-            f"저점권 횡보 및 바닥 다지기 구간입니다. "
-            f"{buy1_high:,.0f}원 돌파와 200일선({ma200:,.0f}원) 안착을 확인하세요."
+            f"하락 이후 200일선({ma200:,.0f}원)이 평평해지며 바닥을 다지는 구간입니다. "
+            f"{buy1_high:,.0f}원 돌파 및 200일선 추세 전환을 확인하세요."
         )
 
     return {
         "stage_items": stage_items,
-        "buy1": f"1차: {buy1_low:,.0f}~{buy1_high:,.0f}원 돌파 후 안착",
-        "buy2": f"2차: 50일선({buy2_price:,.0f}원) 지지 확인 시 추가 매수",
-        "sell1": f"단기 매도: {sell1_price:,.0f}원 부근 저항",
-        "sell2": f"추가 매도: {sell2_price:,.0f}원 부근",
-        "stop_text": f"{stop_price:,.0f}원 이탈 시\n(50일선 하향 이탈 확인)",
+        "buy1": f"1차: {buy1_low:,.0f}~{buy1_high:,.0f}원 구간 돌파·지지 확인",
+        "buy2": f"2차: 200일선({buy2_price:,.0f}원) 지지 및 추세 확인 시 분할 접근",
+        "sell1": f"단기 매도: {sell1_price:,.0f}원 부근 저항 점검",
+        "sell2": f"추가 매도: {sell2_price:,.0f}원 부근 목표 점검",
+        "stop_text": f"{stop_price:,.0f}원 이탈 시\n(200일선 하향 이탈·추세 약화 확인)",
         "conclusion_title": c_title,
         "conclusion_body": c_body,
     }
@@ -603,7 +619,7 @@ def render_summary_panel_html(panel):
     return (
         f'<div class="summary-grid">'
         f'<div class="summary-card">'
-        f'<div class="summary-card-header">단계별 구간 및 근거</div>'
+        f'<div class="summary-card-header">단계별 구간 및 근거 (200일선 기준)</div>'
         f'<div class="summary-card-body">{rows_html}</div>'
         f"</div>"
         f'<div class="summary-card">'
@@ -642,7 +658,7 @@ def render_summary_panel_html(panel):
 
 
 def build_full_download_image(data, company_name, code, panel):
-    """최근 1년치 차트(Stage별 밝은 음영 및 Stage 표기) + 4단 요약 패널을 합친 PNG를 생성합니다."""
+    """최근 1년치 차트(200일선 기준 Stage 음영 및 표기) + 4단 요약 패널을 합친 PNG를 생성합니다."""
     view_data = slice_recent_1y(data)
     fig = plt.figure(figsize=(18, 12.2), dpi=150, facecolor="#FFFFFF")
 
@@ -653,7 +669,7 @@ def build_full_download_image(data, company_name, code, panel):
     top_ax.text(
         0.0,
         0.5,
-        f"{company_name} ({code}) | 현재 {last_stage} | 종가 {last_close:,.0f}원 (최근 1년)",
+        f"{company_name} ({code}) | 현재 {last_stage} (200일선 기준) | 종가 {last_close:,.0f}원 (최근 1년)",
         fontsize=14,
         fontweight="bold",
         color="#1E3A8A",
@@ -722,8 +738,8 @@ def build_full_download_image(data, company_name, code, panel):
     ax1.vlines(dates[up], opens[up], closes[up], color="#16A6A0", lw=2.0, zorder=3)
     ax1.vlines(dates[~up], lows[~up], highs[~up], color="#E45B63", lw=0.8, zorder=2)
     ax1.vlines(dates[~up], closes[~up], opens[~up], color="#E45B63", lw=2.0, zorder=3)
-    ax1.plot(dates, view_data["MA50"], color="#2474FF", lw=1.8, label="50일선", zorder=4)
-    ax1.plot(dates, view_data["MA200"], color="#FF334D", lw=2.0, label="200일선", zorder=4)
+    ax1.plot(dates, view_data["MA200"], color="#FF334D", lw=2.2, label="200일선 (기준)", zorder=4)
+    ax1.plot(dates, view_data["MA50"], color="#2474FF", lw=1.6, label="50일선 (참고)", zorder=4)
     ax1.set_ylabel("가격 (원)", fontsize=9.5, color="#1E293B")
     ax1.legend(loc="upper left", frameon=True, facecolor="#FFFFFF", edgecolor="#CBD5E1")
 
@@ -907,10 +923,104 @@ def build_full_download_image(data, company_name, code, panel):
     return buf.getvalue()
 
 
+def _generate_results(names, years):
+    """입력된 종목 리스트에 대한 분석 결과를 생성합니다."""
+    with st.spinner("KRX 종목 목록을 불러오는 중..."):
+        listing = load_listing()
+
+    start = (date.today() - timedelta(days=365 * years + 120)).isoformat()
+    results = []
+
+    for idx, name in enumerate(names, start=1):
+        resolved = resolve_company(name, listing)
+
+        if isinstance(resolved, tuple):
+            results.append(
+                {
+                    "idx": idx,
+                    "query_name": name,
+                    "status": "multiple",
+                    "candidates": resolved[1],
+                }
+            )
+            continue
+        if resolved is None:
+            results.append(
+                {
+                    "idx": idx,
+                    "query_name": name,
+                    "status": "not_found",
+                }
+            )
+            continue
+
+        company = resolved["Name"]
+        code = resolved["Code"]
+        with st.spinner(f"{company} ({code}) 가격 데이터를 불러오는 중..."):
+            price = load_price(code, start)
+            benchmark = load_benchmark(start)
+
+        if price.empty or not {"Open", "High", "Low", "Close", "Volume"}.issubset(price.columns):
+            results.append(
+                {
+                    "idx": idx,
+                    "query_name": name,
+                    "company": company,
+                    "code": code,
+                    "status": "no_price",
+                }
+            )
+            continue
+
+        analyzed = prepare_analyzed_data(price, benchmark)
+        last_row = analyzed.iloc[-1]
+        summary = {
+            "stage": str(last_row["Stage"]),
+            "close": float(last_row["Close"]),
+            "ma200": f'{last_row["MA200"]:,.0f}' if pd.notna(last_row["MA200"]) else "계산 중",
+            "ma50": f'{last_row["MA50"]:,.0f}' if pd.notna(last_row["MA50"]) else "계산 중",
+            "rs": f'{last_row["MansfieldRS"]:.1f}' if pd.notna(last_row["MansfieldRS"]) else "계산 중",
+        }
+        fig = build_chart(analyzed, company, code)
+        panel = make_summary_panel_data(analyzed, summary)
+        full_png = build_full_download_image(analyzed, company, code, panel)
+        csv_bytes = analyzed.to_csv(encoding="utf-8-sig").encode("utf-8-sig")
+
+        results.append(
+            {
+                "idx": idx,
+                "query_name": name,
+                "company": company,
+                "code": code,
+                "status": "ok",
+                "summary": summary,
+                "fig": fig,
+                "panel_html": render_summary_panel_html(panel),
+                "full_png": full_png,
+                "csv_bytes": csv_bytes,
+            }
+        )
+
+    return results
+
+
 def render():
     _apply_bright_style()
-    st.title("스탠 와인스타인 4단계 주식 분석기")
-    st.caption("50일선·200일선 기준 | 최근 1년 차트 표시 | Stage별 밝은 음영 및 Stage 표기 | 거래량 | Mansfield 상대강도")
+    st.title("스탠 와인스타인 4단계 주식 분석기 (200일선 기준)")
+    st.caption("200일선 위치·기울기 기준 4단계 판정 | 최근 1년 차트 표시 | Stage별 밝은 음영 및 표기 | 다운로드 시 화면 유지")
+
+    st.markdown(
+        """
+<div class="cycle-guide-box">
+<b>📌 200일선 기준 주가 사이클 4단계 요약</b><br>
+• <b>1단계 (기초 지역 / 베이스):</b> 긴 하락 뒤 주가가 횡보하며 바닥을 다지는 구간으로, 200일선이 하락을 멈추고 평평해지며 물량을 모으는 시기입니다.<br>
+• <b>2단계 (상승 국면 / 업트렌드):</b> 주가가 200일선을 상향 돌파하며 본격 상승하는 구간으로, 200일선이 우상향으로 전환됩니다.<br>
+• <b>3단계 (최정상 지역 / 탑):</b> 상승세가 둔화되며 고점권 박스/조정을 보이는 구간으로, 200일선 기울기가 평평해지고 매수 모멘텀이 약화됩니다.<br>
+• <b>4단계 (쇠퇴 국면 / 다운트렌드):</b> 주가가 200일선을 하향 이탈하며 본격 하락하는 구간으로, 200일선이 하락세로 돌아섭니다.
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.header("분석 설정")
@@ -928,63 +1038,60 @@ def render():
     )
     run = st.button("분석 및 차트 생성", type="primary", use_container_width=True)
 
+    if "weinstein_200ma_results" not in st.session_state:
+        st.session_state["weinstein_200ma_results"] = None
+
     if run:
         names = [x.strip() for x in companies_text.splitlines() if x.strip()]
         if not names:
             st.error("기업명을 한 개 이상 입력해 주세요.")
             st.stop()
+        st.session_state["weinstein_200ma_results"] = _generate_results(names, years)
 
-        with st.spinner("KRX 종목 목록을 불러오는 중..."):
-            listing = load_listing()
-
-        start = (date.today() - timedelta(days=365 * years + 100)).isoformat()
-
-        for idx, name in enumerate(names, start=1):
+    results = st.session_state.get("weinstein_200ma_results")
+    if results:
+        for item in results:
+            idx = item["idx"]
+            name = item["query_name"]
             st.divider()
             st.subheader(f"{idx}. {name}")
-            resolved = resolve_company(name, listing)
 
-            if isinstance(resolved, tuple):
-                st.warning(f"'{name}'과 일치하는 종목이 여러 개입니다. 아래에서 종목코드를 확인한 뒤 정확한 종목명으로 다시 입력해 주세요.")
-                st.dataframe(resolved[1], use_container_width=True)
+            status = item["status"]
+            if status == "multiple":
+                st.warning(
+                    f"'{name}'과 일치하는 종목이 여러 개입니다. 아래에서 종목코드를 확인한 뒤 정확한 종목명으로 다시 입력해 주세요."
+                )
+                st.dataframe(item["candidates"], use_container_width=True)
                 continue
-            if resolved is None:
-                st.error(f"'{name}' 종목을 KRX 목록에서 찾지 못했습니다. 정식 기업명 또는 6자리 종목코드를 입력해 주세요.")
+            if status == "not_found":
+                st.error(
+                    f"'{name}' 종목을 KRX 목록에서 찾지 못했습니다. 정식 기업명 또는 6자리 종목코드를 입력해 주세요."
+                )
                 continue
-
-            company = resolved["Name"]
-            code = resolved["Code"]
-            with st.spinner(f"{company} ({code}) 가격 데이터를 불러오는 중..."):
-                price = load_price(code, start)
-                benchmark = load_benchmark(start)
-
-            if price.empty or not {"Open", "High", "Low", "Close", "Volume"}.issubset(price.columns):
+            if status == "no_price":
                 st.error("가격 데이터를 가져오지 못했습니다.")
                 continue
 
-            analyzed = prepare_analyzed_data(price, benchmark)
-            last_row = analyzed.iloc[-1]
-            summary = {
-                "stage": str(last_row["Stage"]),
-                "close": float(last_row["Close"]),
-                "ma50": f'{last_row["MA50"]:,.0f}' if pd.notna(last_row["MA50"]) else "계산 중",
-                "ma200": f'{last_row["MA200"]:,.0f}' if pd.notna(last_row["MA200"]) else "계산 중",
-                "rs": f'{last_row["MansfieldRS"]:.1f}' if pd.notna(last_row["MansfieldRS"]) else "계산 중",
-            }
-            fig, _ = build_chart(analyzed, company, code)
-            panel = make_summary_panel_data(analyzed, summary)
-            full_png = build_full_download_image(analyzed, company, code, panel)
+            company = item["company"]
+            code = item["code"]
+            summary = item["summary"]
 
-            st.plotly_chart(fig, use_container_width=True)
-            st.markdown(render_summary_panel_html(panel), unsafe_allow_html=True)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("현재 단계 (200일선)", summary["stage"])
+            m2.metric("종가", f"{summary['close']:,.0f}원")
+            m3.metric("200일선 (기준)", f"{summary['ma200']}원")
+            m4.metric("50일선 (참고)", f"{summary['ma50']}원")
+
+            st.plotly_chart(item["fig"], use_container_width=True, key=f"chart_{idx}_{code}")
+            st.markdown(item["panel_html"], unsafe_allow_html=True)
 
             safe = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", company)
             col1, col2 = st.columns(2)
             with col1:
                 st.download_button(
                     f"🖼️ {idx}번 {company} 전체 결과 이미지(PNG) 다운로드",
-                    data=full_png,
-                    file_name=f"{idx:02d}_{safe}_{code}_weinstein_1y.png",
+                    data=item["full_png"],
+                    file_name=f"{idx:02d}_{safe}_{code}_weinstein_200ma_1y.png",
                     mime="image/png",
                     key=f"png_{idx}_{code}",
                     use_container_width=True,
@@ -992,8 +1099,8 @@ def render():
             with col2:
                 st.download_button(
                     f"📄 {idx}번 {company} 분석 데이터(CSV) 다운로드",
-                    data=analyzed.to_csv(encoding="utf-8-sig").encode("utf-8-sig"),
-                    file_name=f"{idx:02d}_{safe}_{code}.csv",
+                    data=item["csv_bytes"],
+                    file_name=f"{idx:02d}_{safe}_{code}_200ma.csv",
                     mime="text/csv",
                     key=f"csv_{idx}_{code}",
                     use_container_width=True,
@@ -1001,7 +1108,6 @@ def render():
 
     st.markdown("---")
     st.caption(
-        "면책: 본 프로그램은 공개 가격 데이터와 단순 규칙을 이용한 교육·참고용 도구입니다. "
-        "50/200일선 방식은 스탠 와인스타인의 원래 주봉 30주 이동평균 규칙과 다릅니다. "
-        "단계 분류는 자동화된 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
+        "면책: 본 프로그램은 공개 가격 데이터와 일봉 200일선 규칙을 이용한 교육·참고용 도구입니다. "
+        "단계 분류는 자동화된 규칙 기반 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
     )
