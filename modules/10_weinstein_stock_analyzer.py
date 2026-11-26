@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 스탠 와인스타인 4단계 주식 분석기
-- 기존 Plotly 차트 방식 유지 + Stage별 밝은 색 음영 구분
+- 기존 Plotly 차트 방식 유지 + Stage별 밝은 색 음영 및 구간별 Stage 라벨 표기
 - 차트 및 다운로드 이미지는 최근 1년치 표시 (이동평균/단계/RS는 전체 기간 기준으로 산출)
 - 차트 하단에 4단 요약 패널(단계별 구간 및 근거 / 매수·매도 전략 / 손절 기준 / 종합 결론) 추가
 - 전체 결과 PNG 이미지 및 CSV 다운로드 지원
@@ -257,10 +257,10 @@ def classify_stages(df):
 
 
 STAGE_BRIGHT_COLORS = {
-    "Stage 1": "rgba(96, 165, 250, 0.24)",   # 밝은 파랑
-    "Stage 2": "rgba(74, 222, 128, 0.26)",   # 밝은 초록
-    "Stage 3": "rgba(250, 204, 21, 0.28)",   # 밝은 노랑
-    "Stage 4": "rgba(248, 113, 113, 0.25)",  # 밝은 빨강
+    "Stage 1": "rgba(96, 165, 250, 0.24)",
+    "Stage 2": "rgba(74, 222, 128, 0.26)",
+    "Stage 3": "rgba(250, 204, 21, 0.28)",
+    "Stage 4": "rgba(248, 113, 113, 0.25)",
 }
 
 STAGE_STYLE = {
@@ -268,6 +268,7 @@ STAGE_STYLE = {
         "pill_bg": "#2563EB",
         "row_bg": "#EFF6FF",
         "mpl_bg": "#DBEAFE",
+        "short": "바닥 형성",
         "desc": "50일선 횡보, 바닥 형성",
         "redesc": "저점권 횡보",
     },
@@ -275,6 +276,7 @@ STAGE_STYLE = {
         "pill_bg": "#16A34A",
         "row_bg": "#F0FDF4",
         "mpl_bg": "#DCFCE7",
+        "short": "상승 추세",
         "desc": "50일선 상승, 200일선 돌파",
         "redesc": "50일선 상승, 200일선 돌파",
     },
@@ -282,6 +284,7 @@ STAGE_STYLE = {
         "pill_bg": "#CA8A04",
         "row_bg": "#FEFCE8",
         "mpl_bg": "#FEF9C3",
+        "short": "상승 시도",
         "desc": "50일선 상승 시도, 200일선 접근",
         "redesc": "50일선 상승 시도, 200일선 접근",
     },
@@ -289,6 +292,7 @@ STAGE_STYLE = {
         "pill_bg": "#DC2626",
         "row_bg": "#FEF2F2",
         "mpl_bg": "#FEE2E2",
+        "short": "하락 추세",
         "desc": "고점·저점 하락, 200일선 하락",
         "redesc": "50일선 하락, 재하락",
     },
@@ -337,10 +341,15 @@ def _get_segments(stage_series):
     return segs
 
 
-def add_stage_shading(fig, df):
-    """Plotly 차트의 가격/거래량/RS 패널에 Stage별 밝은 음영을 추가합니다."""
+def add_stage_shading_and_labels(fig, df):
+    """Plotly 차트에 Stage별 밝은 음영과 구간별 Stage 라벨을 표기합니다."""
+    y_max = float(df["High"].max()) if not df.empty else 0.0
+    y_min = float(df["Low"].min()) if not df.empty else 0.0
+    label_y = y_max - (y_max - y_min) * 0.04 if y_max > y_min else y_max
+
     for dt0, dt1, stg in _get_segments(df["Stage"]):
         color = STAGE_BRIGHT_COLORS.get(stg)
+        style = STAGE_STYLE.get(stg)
         if color:
             fig.add_vrect(
                 x0=dt0,
@@ -373,9 +382,26 @@ def add_stage_shading(fig, df):
                 col=1,
             )
 
+        # 구간 길이가 너무 짧아 겹치지 않도록 최소 일수(약 7일) 이상인 구간에 Stage 라벨 표기
+        if style and (dt1 - dt0).days >= 7:
+            mid_dt = dt0 + (dt1 - dt0) / 2
+            fig.add_annotation(
+                x=mid_dt,
+                y=label_y,
+                text=f"<b>{stg}</b><br><span style='font-size:10px;'>({style['short']})</span>",
+                showarrow=False,
+                bgcolor=style["pill_bg"],
+                bordercolor=style["pill_bg"],
+                borderwidth=1,
+                borderpad=3,
+                font=dict(color="#FFFFFF", size=11),
+                row=1,
+                col=1,
+            )
+
 
 def build_chart(data, company_name, code):
-    """최근 1년치 기준으로 Plotly 차트를 생성합니다."""
+    """최근 1년치 기준으로 Stage 음영 및 Stage 표기가 포함된 Plotly 차트를 생성합니다."""
     view_data = slice_recent_1y(data)
 
     fig = make_subplots(
@@ -385,7 +411,7 @@ def build_chart(data, company_name, code):
         vertical_spacing=0.035,
         row_heights=[0.62, 0.17, 0.21],
         subplot_titles=(
-            "주가 · 50일선 · 200일선 (최근 1년)",
+            "주가 · 50일선 · 200일선 (최근 1년 / Stage 구간 표기)",
             "거래량",
             "Mansfield 상대강도 (KOSPI 대비)",
         ),
@@ -452,7 +478,7 @@ def build_chart(data, company_name, code):
     )
     fig.add_hline(y=0, line_dash="dash", line_color="#246bff", row=3, col=1)
 
-    add_stage_shading(fig, view_data)
+    add_stage_shading_and_labels(fig, view_data)
 
     last = data.iloc[-1]
     stage_text = last["Stage"]
@@ -616,7 +642,7 @@ def render_summary_panel_html(panel):
 
 
 def build_full_download_image(data, company_name, code, panel):
-    """최근 1년치 차트(Stage별 밝은 음영) + 4단 요약 패널을 합친 PNG를 생성합니다."""
+    """최근 1년치 차트(Stage별 밝은 음영 및 Stage 표기) + 4단 요약 패널을 합친 PNG를 생성합니다."""
     view_data = slice_recent_1y(data)
     fig = plt.figure(figsize=(18, 12.2), dpi=150, facecolor="#FFFFFF")
 
@@ -653,12 +679,37 @@ def build_full_download_image(data, company_name, code, panel):
         ax.grid(True, linestyle=":", alpha=0.5, color="#CBD5E1")
         ax.tick_params(colors="#334155", labelsize=9)
 
+    y_top = float(view_data["High"].max()) if not view_data.empty else 0.0
+    y_bot = float(view_data["Low"].min()) if not view_data.empty else 0.0
+    txt_y = y_top - (y_top - y_bot) * 0.05 if y_top > y_bot else y_top
+
     for dt0, dt1, stg in _get_segments(view_data["Stage"]):
         if stg in STAGE_STYLE:
-            bg = STAGE_STYLE[stg]["mpl_bg"]
+            st_info = STAGE_STYLE[stg]
+            bg = st_info["mpl_bg"]
             ax1.axvspan(dt0, dt1, color=bg, alpha=0.75, zorder=0)
             ax2.axvspan(dt0, dt1, color=bg, alpha=0.55, zorder=0)
             ax3.axvspan(dt0, dt1, color=bg, alpha=0.50, zorder=0)
+
+            if (dt1 - dt0).days >= 7:
+                mid_dt = dt0 + (dt1 - dt0) / 2
+                ax1.text(
+                    mid_dt,
+                    txt_y,
+                    f"{stg}\n({st_info['short']})",
+                    ha="center",
+                    va="top",
+                    fontsize=8.5,
+                    fontweight="bold",
+                    color="#FFFFFF",
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor=st_info["pill_bg"],
+                        edgecolor="none",
+                        alpha=0.92,
+                    ),
+                    zorder=5,
+                )
 
     dates = view_data.index
     opens = view_data["Open"].values
@@ -859,7 +910,7 @@ def build_full_download_image(data, company_name, code, panel):
 def render():
     _apply_bright_style()
     st.title("스탠 와인스타인 4단계 주식 분석기")
-    st.caption("50일선·200일선 기준 | 최근 1년 차트 표시 | Stage별 밝은 음영 | 거래량 | Mansfield 상대강도")
+    st.caption("50일선·200일선 기준 | 최근 1년 차트 표시 | Stage별 밝은 음영 및 Stage 표기 | 거래량 | Mansfield 상대강도")
 
     with st.sidebar:
         st.header("분석 설정")
@@ -924,13 +975,9 @@ def render():
             panel = make_summary_panel_data(analyzed, summary)
             full_png = build_full_download_image(analyzed, company, code, panel)
 
-            # 1) 최근 1년치 Plotly 차트 출력 (Stage별 밝은 음영 포함)
             st.plotly_chart(fig, use_container_width=True)
-
-            # 2) 첨부 이미지의 4단 요약 패널 출력
             st.markdown(render_summary_panel_html(panel), unsafe_allow_html=True)
 
-            # 3) 이미지(PNG) 및 CSV 다운로드 버튼
             safe = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", company)
             col1, col2 = st.columns(2)
             with col1:
