@@ -80,6 +80,7 @@ ETF_TOP_HOLDINGS: dict[str, list[str]] = {
     "ACE K휴머노이드로봇산업TOP2+": ["로보티즈", "현대차", "레인보우로보틱스", "에스피지", "현대모비스"],
     "KoAct 광통신&위성네트워크액티브": ["RF머트리얼즈", "우리로", "대한광통신", "RFHIC", "케이엠더블유"],
     "TIGER 글로벌AI사이버보안": ["Cloudflare", "Okta ", "Zscaler", "Palo Alto Networks", "Fortinet"],
+    "KODEX 웹툰&드라마": ["CJ ENM", "스튜디오드래곤", "카카오", "NAVER", "SAMG엔터"],
 }
 
 
