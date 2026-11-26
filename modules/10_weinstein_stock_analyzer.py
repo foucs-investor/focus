@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-스탠 와인스타인 4단계 주식 분석기 (200일선 기준)
-- 200일선 위치 및 기울기 기준 Stage 1~4 판정 (1단계 베이스 / 2단계 업트렌드 / 3단계 탑 / 4단계 다운트렌드)
-- 최근 1년 차트 표시 + Stage별 밝은 음영 및 Stage 표기
-- 차트 하단 4단 요약 패널 + PNG / CSV 다운로드
-- st.session_state 활용으로 다운로드 클릭 시에도 화면 결과 유지
+스탠 와인스타인 4단계 주식 분석기 (TraderLion 기준 + 200일선 적용)
+- Stage 1(Base), Stage 2(Advancing), Stage 3(Distribution), Stage 4(Declining) 특성 반영
+- 200일선 위치·기울기 및 50일선(10주선 상당)·거래량·Mansfield RS 연계 판정
+- Stage 1 -> Stage 3 직행 차단 및 인접 사이클 흐름 유지
+- 구간 폭이 좁아 라벨이 겹칠 경우 단계 숫자(1, 2, 3, 4)만 표기
+- 최근 1년 차트 표시 + Stage별 밝은 음영 + 다운로드 시 화면 유지
 """
 
 from datetime import date, timedelta
@@ -90,7 +91,7 @@ def _apply_bright_style():
     padding: 12px 16px;
     margin-bottom: 14px;
     font-size: 0.88rem;
-    line-height: 1.5;
+    line-height: 1.52;
 }
 .summary-grid {
     display: grid;
@@ -242,45 +243,152 @@ def resolve_company(name, listing):
     return None
 
 
+def _allowed_next_stages(curr_stage: str):
+    """스탠 와인스타인 스테이지 전이 규칙 (Stage 1 -> Stage 3 직행 차단)."""
+    if curr_stage == "Stage 1":
+        # Base에서는 상승 돌파(Stage 2) 또는 재이탈(Stage 4)로 이동
+        return {"Stage 1", "Stage 2", "Stage 4"}
+    if curr_stage == "Stage 2":
+        # Advancing에서는 고점권 분배/둔화(Stage 3) 또는 추세 이탈(Stage 4, Stage 1)
+        return {"Stage 2", "Stage 3", "Stage 4", "Stage 1"}
+    if curr_stage == "Stage 3":
+        # Distribution에서는 하락 전환(Stage 4) 또는 상승 재개(Stage 2)
+        return {"Stage 3", "Stage 4", "Stage 2"}
+    if curr_stage == "Stage 4":
+        # Declining에서는 바닥 다지기(Stage 1)로 진입
+        return {"Stage 4", "Stage 1"}
+    return {"Stage 1", "Stage 2", "Stage 3", "Stage 4"}
+
+
+def _raw_candidate_stage_traderlion_200ma(
+    close_val,
+    ma200_val,
+    ma50_val,
+    slope20_val,
+    ret10_val,
+    vol_ratio_val,
+    near_high60_val,
+    low60_val,
+    prev_stage,
+):
+    """
+    TraderLion Stage Analysis 원칙을 200일선 중심으로 적용한 일차 후보 단계 판정.
+    - Stage 2 (Advancing): 주가 > 200일선, 200일선 상승/돌파, 상승 추세 유지
+    - Stage 3 (Distribution): 고점권(60일 고점 근접)에서 상승 둔화·변동성/횡보·50일선 하향 시도·200일선 기울기 둔화
+    - Stage 4 (Declining): 200일선 하향 이탈 및 200일선 하락 추세 진행(저점/고점 하락)
+    - Stage 1 (Base): 하락 추세 진정 후 200일선 평평화 및 저점권 횡보·바닥 다지기
+    """
+    if pd.isna(ma200_val):
+        return "데이터 축적 중"
+
+    slope = 0.0 if pd.isna(slope20_val) else float(slope20_val)
+    ret10 = 0.0 if pd.isna(ret10_val) else float(ret10_val)
+    vol_ratio = 1.0 if pd.isna(vol_ratio_val) else float(vol_ratio_val)
+    below_ma50 = pd.notna(ma50_val) and (close_val < float(ma50_val))
+
+    # Stage 3 (Distribution / Topping):
+    # Stage 2 또는 Stage 3 진행 중 고점권(60일 고점의 84% 이상)에 있으며
+    # 200일선 기울기가 둔화되거나 단기 조정이 시작되고 50일선 압박/거래량 변동을 보이는 구간
+    dist_signal = (
+        bool(near_high60_val)
+        and (slope <= 0.014 or ret10 < -0.015 or (below_ma50 and vol_ratio >= 1.0))
+        and close_val >= ma200_val * 0.94
+    )
+    if prev_stage in {"Stage 2", "Stage 3"} and dist_signal:
+        return "Stage 3"
+
+    # Stage 2 (Advancing):
+    # 주가가 200일선 위에서 상승 추세를 이어가거나 돌파하는 구간
+    if close_val > ma200_val and slope >= -0.002:
+        return "Stage 2"
+
+    # Stage 4 (Declining):
+    # 주가가 200일선 아래로 밀리고 200일선 기울기가 하락세로 전환/진행되는 구간
+    if close_val < ma200_val and slope < -0.003:
+        return "Stage 4"
+
+    # Stage 2/3에서 200일선 아래로 하락 이탈하는 경우
+    if prev_stage in {"Stage 2", "Stage 3"} and close_val < ma200_val * 0.985 and ret10 < -0.025:
+        return "Stage 4"
+
+    # Stage 4에서 하락폭이 멈추고 저점권 횡보·200일선 평평화로 전환되는 경우 Stage 1 (Base)
+    if prev_stage == "Stage 4":
+        near_low60 = pd.notna(low60_val) and (close_val <= float(low60_val) * 1.13)
+        if slope >= -0.003 and (near_low60 or close_val >= ma200_val * 0.95):
+            return "Stage 1"
+        return "Stage 4"
+
+    # Stage 1 (Base): 바닥권 횡보 및 베이스 형성 구간
+    return "Stage 1"
+
+
 def classify_stages_200ma(df):
     """
-    200일 이동평균선(200일선) 기준 주가 사이클 4단계 판정:
-    - Stage 2 (상승 국면 / 업트렌드): 200일선이 우상향하고 주가가 200일선 위에서 추세 유지/돌파
-    - Stage 4 (쇠퇴 국면 / 다운트렌드): 200일선이 하락세이고 주가가 200일선 아래에서 하락
-    - Stage 3 (최정상 지역 / 탑): 상승 이후 200일선 기울기가 둔화·평평해지고 고점권 박스/조정 진입
-    - Stage 1 (기초 지역 / 베이스): 하락 이후 200일선 하락이 멈추고 평평해지며 바닥을 다지는 횡보 구간
+    TraderLion 기준 + 200일선 중심 4단계 판정
+    - Stage 1 -> Stage 3 직행을 방지하고 인접 사이클 전이를 반영합니다.
     """
     close = df["Close"]
     ma200 = df["MA200"]
-    # 약 1개월(20거래일) 기준 200일선 기울기 변화율
+    ma50 = df["MA50"]
     slope200 = ma200.diff(20) / ma200.shift(20)
-    # 최근 60거래일 고점 대비 현재가 위치
+    ret10 = close.pct_change(10)
+    vol_avg30 = df["Volume"].rolling(30, min_periods=10).mean()
+    vol_ratio = df["Volume"] / vol_avg30.replace(0, np.nan)
     high60 = close.rolling(60, min_periods=20).max()
-    near_top = close >= high60 * 0.93
+    low60 = close.rolling(60, min_periods=20).min()
+    near_high60 = close >= high60 * 0.84
 
-    # 2단계: 200일선 상승(기울기 > +0.8%) & 주가가 200일선 위
-    s2 = (close > ma200) & (slope200 > 0.008)
+    raw_stages = []
+    prev_stage = None
 
-    # 4단계: 200일선 하락(기울기 < -0.8%) & 주가가 200일선 아래
-    s4 = (close < ma200) & (slope200 < -0.008)
+    for idx in range(len(df)):
+        cand = _raw_candidate_stage_traderlion_200ma(
+            float(close.iloc[idx]),
+            ma200.iloc[idx],
+            ma50.iloc[idx],
+            slope200.iloc[idx],
+            ret10.iloc[idx],
+            vol_ratio.iloc[idx],
+            near_high60.iloc[idx],
+            low60.iloc[idx],
+            prev_stage,
+        )
+        if cand == "데이터 축적 중":
+            raw_stages.append(cand)
+            continue
 
-    # 3단계: 주가가 200일선 위이거나 근접한 상태에서 200일선 기울기가 둔화/평평해지며 고점권 형성
-    s3 = (
-        (~s2)
-        & (close >= ma200 * 0.97)
-        & (slope200.abs() <= 0.008)
-        & near_top
-    )
+        if prev_stage is None or prev_stage == "데이터 축적 중":
+            chosen = cand
+        else:
+            allowed = _allowed_next_stages(prev_stage)
+            if cand in allowed:
+                chosen = cand
+            else:
+                if prev_stage == "Stage 1" and cand == "Stage 3":
+                    chosen = "Stage 2" if float(close.iloc[idx]) >= float(ma200.iloc[idx]) else "Stage 1"
+                else:
+                    chosen = prev_stage
 
-    # 1단계: 나머지 중 200일선 하락이 멈추고 평평해지거나 바닥권 횡보/재진입 구간
-    s1 = ~(s2 | s3 | s4)
+        raw_stages.append(chosen)
+        prev_stage = chosen
 
-    stage = pd.Series("Stage 1", index=df.index, dtype="object")
-    stage.loc[s2] = "Stage 2"
-    stage.loc[s3] = "Stage 3"
-    stage.loc[s4] = "Stage 4"
-    stage.loc[ma200.isna()] = "데이터 축적 중"
-    return stage
+    stage_series = pd.Series(raw_stages, index=df.index, dtype="object")
+    segs = _get_segments(stage_series)
+    for dt0, dt1, stg in segs:
+        if stg == "데이터 축적 중":
+            continue
+        seg_len = len(stage_series.loc[(stage_series.index >= dt0) & (stage_series.index < dt1)])
+        if 0 < seg_len < 5 and dt1 != stage_series.index[-1]:
+            next_val = stage_series.loc[stage_series.index >= dt1]
+            prev_val = stage_series.loc[stage_series.index < dt0]
+            if not next_val.empty:
+                target_stg = next_val.iloc[0]
+                prev_stg = prev_val.iloc[-1] if not prev_val.empty else target_stg
+                if target_stg in _allowed_next_stages(prev_stg):
+                    mask = (stage_series.index >= dt0) & (stage_series.index < dt1)
+                    stage_series.loc[mask] = target_stg
+
+    return stage_series
 
 
 STAGE_BRIGHT_COLORS = {
@@ -292,35 +400,39 @@ STAGE_BRIGHT_COLORS = {
 
 STAGE_STYLE = {
     "Stage 1": {
+        "num": "1",
         "pill_bg": "#2563EB",
         "row_bg": "#EFF6FF",
         "mpl_bg": "#DBEAFE",
-        "short": "1단계·베이스",
-        "desc": "200일선 평평화, 바닥 횡보·물량 매집",
-        "redesc": "200일선 평평화, 재바닥 횡보",
+        "short": "1단계·Base",
+        "desc": "200일선 평평화, 저점권 횡보·베이스 형성",
+        "redesc": "저점권 횡보, 1단계 베이스 유지",
     },
     "Stage 2": {
+        "num": "2",
         "pill_bg": "#16A34A",
         "row_bg": "#F0FDF4",
         "mpl_bg": "#DCFCE7",
-        "short": "2단계·업트렌드",
-        "desc": "200일선 우상향·돌파, 본격 상승 추세",
-        "redesc": "200일선 우상향, 상승 추세 지속",
+        "short": "2단계·Advancing",
+        "desc": "200일선 위 상승 추세·돌파 흐름",
+        "redesc": "200일선 위 상승 추세 재개",
     },
     "Stage 3": {
+        "num": "3",
         "pill_bg": "#CA8A04",
         "row_bg": "#FEFCE8",
         "mpl_bg": "#FEF9C3",
-        "short": "3단계·탑",
-        "desc": "200일선 기울기 둔화, 고점권 횡보·모멘텀 약화",
-        "redesc": "200일선 평평화, 고점권 박스·분배 점검",
+        "short": "3단계·Distribution",
+        "desc": "고점권 상승 둔화·횡보/변동성 분배 구간",
+        "redesc": "고점권 추세 둔화·분배 점검",
     },
     "Stage 4": {
+        "num": "4",
         "pill_bg": "#DC2626",
         "row_bg": "#FEF2F2",
         "mpl_bg": "#FEE2E2",
-        "short": "4단계·다운트렌드",
-        "desc": "200일선 하락 전환·이탈, 본격 하락 추세",
+        "short": "4단계·Declining",
+        "desc": "200일선 하향 이탈·고점/저점 하락 추세",
         "redesc": "200일선 하락세 지속, 하락 추세 주의",
     },
 }
@@ -368,11 +480,23 @@ def _get_segments(stage_series):
     return segs
 
 
+def _format_stage_label(stg, style, seg_days, total_days):
+    """
+    구간 폭이 좁아 라벨이 겹칠 경우 단계 숫자('1', '2', '3', '4')만 표기하고,
+    충분히 넓은 구간에서는 'Stage X (설명)' 형태로 표기합니다.
+    """
+    ratio = seg_days / max(total_days, 1)
+    if seg_days < 30 or ratio < 0.09:
+        return f"<b>{style['num']}</b>", True
+    return f"<b>{stg}</b><br><span style='font-size:10px;'>({style['short']})</span>", False
+
+
 def add_stage_shading_and_labels(fig, df):
-    """Plotly 차트에 Stage별 밝은 음영과 구간별 Stage 라벨을 표기합니다."""
+    """Plotly 차트에 Stage별 밝은 음영과 구간별 Stage 표기(겹침 시 숫자만)를 추가합니다."""
     y_max = float(df["High"].max()) if not df.empty else 0.0
     y_min = float(df["Low"].min()) if not df.empty else 0.0
     label_y = y_max - (y_max - y_min) * 0.04 if y_max > y_min else y_max
+    total_days = max((df.index[-1] - df.index[0]).days, 1) if len(df) >= 2 else 1
 
     for dt0, dt1, stg in _get_segments(df["Stage"]):
         color = STAGE_BRIGHT_COLORS.get(stg)
@@ -409,18 +533,20 @@ def add_stage_shading_and_labels(fig, df):
                 col=1,
             )
 
-        if style and (dt1 - dt0).days >= 7:
+        seg_days = (dt1 - dt0).days
+        if style and seg_days >= 3:
             mid_dt = dt0 + (dt1 - dt0) / 2
+            lbl_text, is_num_only = _format_stage_label(stg, style, seg_days, total_days)
             fig.add_annotation(
                 x=mid_dt,
                 y=label_y,
-                text=f"<b>{stg}</b><br><span style='font-size:10px;'>({style['short']})</span>",
+                text=lbl_text,
                 showarrow=False,
                 bgcolor=style["pill_bg"],
                 bordercolor=style["pill_bg"],
                 borderwidth=1,
-                borderpad=3,
-                font=dict(color="#FFFFFF", size=11),
+                borderpad=3 if is_num_only else 4,
+                font=dict(color="#FFFFFF", size=12 if is_num_only else 10.5),
                 row=1,
                 col=1,
             )
@@ -437,7 +563,7 @@ def build_chart(data, company_name, code):
         vertical_spacing=0.035,
         row_heights=[0.62, 0.17, 0.21],
         subplot_titles=(
-            "주가 · 200일선(핵심) · 50일선 (최근 1년 / 200일선 기준 Stage 표기)",
+            "주가 · 200일선(기준) · 50일선 (최근 1년 / TraderLion + 200일선 Stage)",
             "거래량",
             "Mansfield 상대강도 (KOSPI 대비)",
         ),
@@ -470,7 +596,7 @@ def build_chart(data, company_name, code):
         go.Scatter(
             x=view_data.index,
             y=view_data["MA50"],
-            name="50일선 (참고)",
+            name="50일선 (10주선 상당)",
             line=dict(color="#2474ff", width=1.6),
         ),
         row=1,
@@ -569,28 +695,28 @@ def make_summary_panel_data(data, summary):
     stop_price = round(min(sup_price, ma200 * 0.96), -2)
 
     if stage == "Stage 2":
-        c_title = "2단계 상승 국면 (200일선 기준)"
+        c_title = "Stage 2 상승 국면 (Advancing)"
         c_body = (
-            f"주가가 200일선({ma200:,.0f}원) 위에서 우상향 추세를 보이는 상승 국면입니다. "
-            f"{sell1_price:,.0f}원 부근 저항과 200일선 지지 여부를 점검하세요."
+            f"200일선({ma200:,.0f}원) 위에서 상승 추세를 이어가는 구간입니다. "
+            f"{sell1_price:,.0f}원 저항과 200일선·50일선 지지 여부를 점검하세요."
         )
     elif stage == "Stage 3":
-        c_title = "3단계 최정상·고점 점검 구간"
+        c_title = "Stage 3 고점 분배 구간 (Distribution)"
         c_body = (
-            f"200일선({ma200:,.0f}원) 기울기가 둔화되며 고점권 횡보 흐름을 보이는 구간입니다. "
-            f"{sell1_price:,.0f}원 부근 저항과 추세 둔화 신호를 확인하세요."
+            f"상승 모멘텀이 둔화되며 고점권 횡보·분배 흐름이 나타나는 구간입니다. "
+            f"{sell1_price:,.0f}원 저항과 200일선({ma200:,.0f}원) 기울기 변화를 확인하세요."
         )
     elif stage == "Stage 4":
-        c_title = "4단계 쇠퇴·하락 국면"
+        c_title = "Stage 4 하락 추세 구간 (Declining)"
         c_body = (
-            f"주가가 200일선({ma200:,.0f}원) 아래에서 하락세로 돌아선 구간입니다. "
-            f"{stop_price:,.0f}원 이탈 여부 및 200일선 재돌파·평평화 여부를 확인하세요."
+            f"200일선({ma200:,.0f}원) 아래에서 저점·고점이 낮아지는 하락 추세 구간입니다. "
+            f"{stop_price:,.0f}원 이탈 여부 및 추세 반전·베이스 형성 전까지 신중히 접근하세요."
         )
     else:
-        c_title = "1단계 기초·베이스 구간"
+        c_title = "Stage 1 바닥 다지기 구간 (Base)"
         c_body = (
-            f"하락 이후 200일선({ma200:,.0f}원)이 평평해지며 바닥을 다지는 구간입니다. "
-            f"{buy1_high:,.0f}원 돌파 및 200일선 추세 전환을 확인하세요."
+            f"하락 이후 200일선({ma200:,.0f}원) 부근에서 횡보하며 베이스를 다지는 구간입니다. "
+            f"{buy1_high:,.0f}원 돌파 및 거래량 동반 Stage 2 전환 신호를 확인하세요."
         )
 
     return {
@@ -698,6 +824,7 @@ def build_full_download_image(data, company_name, code, panel):
     y_top = float(view_data["High"].max()) if not view_data.empty else 0.0
     y_bot = float(view_data["Low"].min()) if not view_data.empty else 0.0
     txt_y = y_top - (y_top - y_bot) * 0.05 if y_top > y_bot else y_top
+    total_days = max((view_data.index[-1] - view_data.index[0]).days, 1) if len(view_data) >= 2 else 1
 
     for dt0, dt1, stg in _get_segments(view_data["Stage"]):
         if stg in STAGE_STYLE:
@@ -707,15 +834,19 @@ def build_full_download_image(data, company_name, code, panel):
             ax2.axvspan(dt0, dt1, color=bg, alpha=0.55, zorder=0)
             ax3.axvspan(dt0, dt1, color=bg, alpha=0.50, zorder=0)
 
-            if (dt1 - dt0).days >= 7:
+            seg_days = (dt1 - dt0).days
+            if seg_days >= 3:
                 mid_dt = dt0 + (dt1 - dt0) / 2
+                ratio = seg_days / total_days
+                is_num_only = seg_days < 30 or ratio < 0.09
+                mpl_lbl = st_info["num"] if is_num_only else f"{stg}\n({st_info['short']})"
                 ax1.text(
                     mid_dt,
                     txt_y,
-                    f"{stg}\n({st_info['short']})",
+                    mpl_lbl,
                     ha="center",
                     va="top",
-                    fontsize=8.5,
+                    fontsize=9.5 if is_num_only else 8.0,
                     fontweight="bold",
                     color="#FFFFFF",
                     bbox=dict(
@@ -1006,17 +1137,17 @@ def _generate_results(names, years):
 
 def render():
     _apply_bright_style()
-    st.title("스탠 와인스타인 4단계 주식 분석기 (200일선 기준)")
-    st.caption("200일선 위치·기울기 기준 4단계 판정 | 최근 1년 차트 표시 | Stage별 밝은 음영 및 표기 | 다운로드 시 화면 유지")
+    st.title("스탠 와인스타인 4단계 주식 분석기 (TraderLion + 200일선 기준)")
+    st.caption("TraderLion Stage Analysis 원칙 + 200일선 기준 4단계 판정 | 최근 1년 차트 표시 | 다운로드 시 화면 유지")
 
     st.markdown(
         """
 <div class="cycle-guide-box">
-<b>📌 200일선 기준 주가 사이클 4단계 요약</b><br>
-• <b>1단계 (기초 지역 / 베이스):</b> 긴 하락 뒤 주가가 횡보하며 바닥을 다지는 구간으로, 200일선이 하락을 멈추고 평평해지며 물량을 모으는 시기입니다.<br>
-• <b>2단계 (상승 국면 / 업트렌드):</b> 주가가 200일선을 상향 돌파하며 본격 상승하는 구간으로, 200일선이 우상향으로 전환됩니다.<br>
-• <b>3단계 (최정상 지역 / 탑):</b> 상승세가 둔화되며 고점권 박스/조정을 보이는 구간으로, 200일선 기울기가 평평해지고 매수 모멘텀이 약화됩니다.<br>
-• <b>4단계 (쇠퇴 국면 / 다운트렌드):</b> 주가가 200일선을 하향 이탈하며 본격 하락하는 구간으로, 200일선이 하락세로 돌아섭니다.
+<b>📌 TraderLion 기준 + 200일선 주가 사이클 4단계 요약</b><br>
+• <b>Stage 1 (Base / 기초 다지기):</b> 하락세 진정 후 횡보하며 바닥을 다지는 구간으로, 200일선이 평평해지고 물량 매집이 이루어집니다.<br>
+• <b>Stage 2 (Advancing / 상승 추세):</b> 저항 돌파 및 200일선 우상향·상방 안착과 함께 본격 상승 추세가 이어지는 구간입니다.<br>
+• <b>Stage 3 (Distribution / 고점 분배):</b> 고점권에서 상승 모멘텀이 둔화되고 변동성·횡보(churning) 및 200일선 기울기 둔화가 나타나는 구간입니다.<br>
+• <b>Stage 4 (Declining / 하락 추세):</b> 지지선과 200일선을 하향 이탈하며 저점·고점이 낮아지는 하락 추세 구간입니다.
 </div>
 """,
         unsafe_allow_html=True,
@@ -1108,6 +1239,6 @@ def render():
 
     st.markdown("---")
     st.caption(
-        "면책: 본 프로그램은 공개 가격 데이터와 일봉 200일선 규칙을 이용한 교육·참고용 도구입니다. "
-        "단계 분류는 자동화된 규칙 기반 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
+        "면책: 본 프로그램은 공개 가격 데이터와 200일선 기반 규칙을 이용한 교육·참고용 도구입니다. "
+        "단계 분류는 자동화된 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
     )
