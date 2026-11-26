@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-스탠 와인스타인 4단계 주식 분석기 (밝은 리포트 이미지 생성 및 PNG 다운로드 지원)
-- MENU_NAME = "와인스타인 4단계 분석"
-- app.py의 자동 모듈 로더(MENU_NAME, render)와 호환됩니다.
+스탠 와인스타인 4단계 주식 분석기
+- 기존 Plotly 차트 방식 유지
+- 차트 하단에 4단 요약 패널(단계별 구간 및 근거 / 매수·매도 전략 / 손절 기준 / 종합 결론) 추가
+- 전체 결과 PNG 이미지 및 CSV 다운로드 지원
 """
 
 from datetime import date, timedelta
@@ -17,6 +18,8 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 MENU_NAME = "와인스타인 4단계 분석"
@@ -37,7 +40,6 @@ def _configure_korean_font():
             plt.rcParams["font.family"] = name
             break
 
-    # 리눅스 나눔폰트 경로 직접 탐색 백업
     linux_paths = [
         "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
         "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
@@ -56,8 +58,8 @@ def _configure_korean_font():
 _configure_korean_font()
 
 
-def _apply_bright_theme():
-    """화면이 어둡게 보이지 않도록 밝은 라이트 테마 CSS를 적용합니다."""
+def _apply_bright_style():
+    """전체 화면과 4단 요약 패널을 밝은 톤으로 표시합니다."""
     st.markdown(
         """
         <style>
@@ -80,13 +82,97 @@ def _apply_bright_theme():
                 color: #1E293B !important;
                 border-color: #CBD5E1 !important;
             }
-            .bright-info-card {
+            .summary-grid {
+                display: grid;
+                grid-template-columns: 1.35fr 1.25fr 0.85fr 1.15fr;
+                gap: 10px;
+                margin-top: 8px;
+                margin-bottom: 16px;
+            }
+            @media (max-width: 1100px) {
+                .summary-grid {
+                    grid-template-columns: 1fr 1fr;
+                }
+            }
+            @media (max-width: 650px) {
+                .summary-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+            .summary-card {
                 background-color: #FFFFFF;
-                border: 1px solid #CBD5E1;
-                border-radius: 10px;
-                padding: 14px 18px;
-                margin-bottom: 12px;
-                box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+                border: 1.5px solid #1E3A8A;
+                border-radius: 6px;
+                overflow: hidden;
+                box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+            }
+            .summary-card-header {
+                background-color: #1E3A8A;
+                color: #FFFFFF !important;
+                font-weight: 700;
+                font-size: 0.98rem;
+                padding: 7px 12px;
+            }
+            .summary-card-body {
+                padding: 10px 12px;
+                font-size: 0.85rem;
+                line-height: 1.45;
+                color: #1E293B !important;
+            }
+            .stage-row {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 3px 6px;
+                border-radius: 4px;
+                margin-bottom: 4px;
+            }
+            .stage-pill {
+                display: inline-block;
+                min-width: 56px;
+                text-align: center;
+                color: #FFFFFF !important;
+                font-weight: 700;
+                font-size: 0.76rem;
+                padding: 2px 6px;
+                border-radius: 3px;
+            }
+            .strat-badge {
+                display: inline-block;
+                color: #FFFFFF !important;
+                font-weight: 700;
+                font-size: 0.8rem;
+                padding: 2px 8px;
+                border-radius: 3px;
+                margin-bottom: 4px;
+            }
+            .strat-box-buy {
+                background-color: #F0FDF4;
+                border-radius: 4px;
+                padding: 6px 8px;
+                margin-bottom: 8px;
+            }
+            .strat-box-sell {
+                background-color: #FEF2F2;
+                border-radius: 4px;
+                padding: 6px 8px;
+            }
+            .stop-center {
+                height: 100%;
+                min-height: 140px;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                text-align: center;
+                font-weight: 700;
+                color: #1E293B !important;
+            }
+            .conclusion-title {
+                color: #15803D !important;
+                font-weight: 800;
+                font-size: 1.02rem;
+                margin-bottom: 6px;
             }
         </style>
         """,
@@ -169,85 +255,237 @@ def classify_stages(df):
     return stage
 
 
-STAGE_META = {
+STAGE_COLORS = {
+    "Stage 1": "rgba(55, 125, 235, 0.13)",
+    "Stage 2": "rgba(70, 190, 85, 0.15)",
+    "Stage 3": "rgba(245, 185, 45, 0.17)",
+    "Stage 4": "rgba(225, 65, 65, 0.14)",
+}
+
+STAGE_STYLE = {
     "Stage 1": {
-        "short": "바닥 형성",
-        "re_short": "재바닥 형성",
-        "bg": "#EAF2FF",
-        "header": "#2563EB",
-        "badge": "#2563EB",
-        "reason": "50일선·200일선 인근 횡보 및 저점 다지기",
+        "pill_bg": "#2563EB",
+        "row_bg": "#EFF6FF",
+        "desc": "50일선 횡보, 바닥 형성",
+        "redesc": "저점권 횡보",
     },
     "Stage 2": {
-        "short": "상승 추세",
-        "re_short": "상승 추세",
-        "bg": "#DCFCE7",
-        "header": "#16A34A",
-        "badge": "#16A34A",
-        "reason": "50일선 상승, 200일선 상향 돌파·추세 유지",
+        "pill_bg": "#16A34A",
+        "row_bg": "#F0FDF4",
+        "desc": "50일선 상승, 200일선 돌파",
+        "redesc": "50일선 상승, 200일선 돌파",
     },
     "Stage 3": {
-        "short": "상승 시도",
-        "re_short": "상승 시도",
-        "bg": "#FEF9C3",
-        "header": "#CA8A04",
-        "badge": "#CA8A04",
-        "reason": "50일선 상향 시도 및 고점권 수급 전환",
+        "pill_bg": "#CA8A04",
+        "row_bg": "#FEFCE8",
+        "desc": "50일선 상승 시도, 200일선 접근",
+        "redesc": "50일선 상승 시도, 200일선 접근",
     },
     "Stage 4": {
-        "short": "하락 추세",
-        "re_short": "재하락",
-        "bg": "#FEE2E2",
-        "header": "#DC2626",
-        "badge": "#DC2626",
-        "reason": "고점·저점 하락 및 50일선·200일선 약세",
+        "pill_bg": "#DC2626",
+        "row_bg": "#FEF2F2",
+        "desc": "고점·저점 하락, 200일선 하락",
+        "redesc": "50일선 하락, 재하락",
     },
 }
 
 
-def _build_segments(stage_series):
-    """연속된 단계 구간 리스트를 생성합니다."""
+def add_stage_shading(fig, df):
+    stage = df["Stage"]
+    if stage.empty:
+        return
+    start = stage.index[0]
+    current = stage.iloc[0]
+    for i in range(1, len(stage)):
+        if stage.iloc[i] != current:
+            end = stage.index[i]
+            color = STAGE_COLORS.get(current)
+            if color:
+                fig.add_vrect(
+                    x0=start,
+                    x1=current != "데이터 축적 중" and end or end,
+                    fillcolor=color,
+                    opacity=1,
+                    line_width=0,
+                    layer="below",
+                    row=1,
+                    col=1,
+                )
+            start, current = end, stage.iloc[i]
+    color = STAGE_COLORS.get(current)
+    if color:
+        fig.add_vrect(
+            x0=start,
+            x1=stage.index[-1],
+            fillcolor=color,
+            opacity=1,
+            line_width=0,
+            layer="below",
+            row=1,
+            col=1,
+        )
+
+
+def _get_segments(stage_series):
     if stage_series.empty:
         return []
-    segments = []
+    segs = []
     start = stage_series.index[0]
     curr = stage_series.iloc[0]
     for i in range(1, len(stage_series)):
         if stage_series.iloc[i] != curr:
-            segments.append((start, stage_series.index[i], curr))
+            segs.append((start, stage_series.index[i], curr))
             start = stage_series.index[i]
             curr = stage_series.iloc[i]
-    segments.append((start, stage_series.index[-1], curr))
-    return segments
+    segs.append((start, stage_series.index[-1], curr))
+    return segs
 
 
-def _build_strategy_and_segments(data, segments):
-    """하단 4단 카드에 들어갈 구간 요약 및 매매/손절/종합 결론을 생성합니다."""
+def build_chart(df, benchmark, company_name, code):
+    data = df.copy()
+    data["MA50"] = data["Close"].rolling(50).mean()
+    data["MA200"] = data["Close"].rolling(200).mean()
+    data["Stage"] = classify_stages(data)
+
+    if not benchmark.empty and "Close" in benchmark.columns:
+        rel = data["Close"].div(benchmark["Close"].reindex(data.index).ffill())
+        rs_base = rel.rolling(252, min_periods=100).mean()
+        data["MansfieldRS"] = ((rel / rs_base) - 1) * 100
+    else:
+        data["MansfieldRS"] = float("nan")
+
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.035,
+        row_heights=[0.62, 0.17, 0.21],
+        subplot_titles=("주가 · 50일선 · 200일선", "거래량", "Mansfield 상대강도 (KOSPI 대비)"),
+    )
+    fig.add_trace(
+        go.Candlestick(
+            x=data.index,
+            open=data["Open"],
+            high=data["High"],
+            low=data["Low"],
+            close=data["Close"],
+            name="주가",
+            increasing_line_color="#16a6a0",
+            decreasing_line_color="#e45b63",
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["MA50"],
+            name="50일선",
+            line=dict(color="#2474ff", width=1.8),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["MA200"],
+            name="200일선",
+            line=dict(color="#ff334d", width=2),
+        ),
+        row=1,
+        col=1,
+    )
+
+    vol_colors = [
+        "#16a6a0" if c >= o else "#e45b63"
+        for c, o in zip(data["Close"], data["Open"])
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=data.index,
+            y=data["Volume"],
+            name="거래량",
+            marker_color=vol_colors,
+        ),
+        row=2,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=data.index,
+            y=data["MansfieldRS"],
+            name="Mansfield RS",
+            line=dict(color="#333333", width=1.3),
+        ),
+        row=3,
+        col=1,
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="#246bff", row=3, col=1)
+
+    add_stage_shading(fig, data)
+
+    last = data.iloc[-1]
+    stage_text = last["Stage"]
+    ma50_text = f'{last["MA50"]:,.0f}' if pd.notna(last["MA50"]) else "계산 중"
+    ma200_text = f'{last["MA200"]:,.0f}' if pd.notna(last["MA200"]) else "계산 중"
+    rs_text = f'{last["MansfieldRS"]:.1f}' if pd.notna(last["MansfieldRS"]) else "계산 중"
+
+    fig.update_layout(
+        title=f"{company_name} ({code}) | 현재 {stage_text} | 종가 {last['Close']:,.0f}원",
+        height=820,
+        plot_bgcolor="#FFFFFF",
+        paper_bgcolor="#FFFFFF",
+        font=dict(color="#1E293B"),
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", y=1.02, x=0),
+        margin=dict(l=50, r=30, t=95, b=35),
+        hovermode="x unified",
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#E2E8F0")
+    fig.update_yaxes(showgrid=True, gridcolor="#E2E8F0")
+    fig.update_yaxes(title_text="가격 (원)", row=1, col=1)
+    fig.update_yaxes(title_text="거래량", row=2, col=1)
+    fig.update_yaxes(title_text="RS (%)", row=3, col=1)
+
+    return fig, data, {
+        "stage": stage_text,
+        "close": float(last["Close"]),
+        "ma50": ma50_text,
+        "ma200": ma200_text,
+        "rs": rs_text,
+    }
+
+
+def make_summary_panel_data(data, summary):
+    """첨부된 4단 요약 패널 구성을 위한 데이터를 생성합니다."""
     last = data.iloc[-1]
     close = float(last["Close"])
     ma50 = float(last["MA50"]) if pd.notna(last["MA50"]) else close
     ma200 = float(last["MA200"]) if pd.notna(last["MA200"]) else close
-    stage = str(last["Stage"])
+    stage = summary["stage"]
 
-    valid_segs = [s for s in segments if s[2] in STAGE_META]
-    stage_cards = []
-    s1_count = 0
-    s4_count = 0
-    for dt0, dt1, stg in valid_segs[-6:]:
-        meta = STAGE_META[stg]
-        if stg == "Stage 1":
-            s1_count += 1
-            label = "Stage 1" if s1_count == 1 else "Stage 1"
-            sub = meta["short"] if s1_count == 1 else meta["re_short"]
-        elif stg == "Stage 4":
-            s4_count += 1
-            label = "Stage 4"
-            sub = meta["short"] if s4_count == 1 else meta["re_short"]
+    segs = [s for s in _get_segments(data["Stage"]) if s[2] in STAGE_STYLE]
+    stage_items = []
+    seen = {}
+    for idx_s, (dt0, dt1, stg) in enumerate(segs[-6:], start=1):
+        meta = STAGE_STYLE[stg]
+        seen[stg] = seen.get(stg, 0) + 1
+        desc = meta["desc"] if seen[stg] == 1 else meta["redesc"]
+        if idx_s == len(segs[-6:]):
+            period_str = f"{dt0.strftime('%Y년')} ~ 현재"
         else:
-            label = stg
-            sub = meta["short"]
-        period_str = f"{dt0.strftime('%Y.%m')} ~ {dt1.strftime('%Y.%m')}"
-        stage_cards.append((label, sub, meta["badge"], period_str, meta["reason"]))
+            period_str = f"{dt0.strftime('%Y년')} ~ {dt1.strftime('%Y년')}"
+        stage_items.append(
+            {
+                "stage": stg,
+                "pill_bg": meta["pill_bg"],
+                "row_bg": meta["row_bg"],
+                "period": period_str,
+                "desc": desc,
+            }
+        )
 
     recent60 = data.tail(60)
     res_price = round(float(recent60["High"].max()), -2)
@@ -260,463 +498,252 @@ def _build_strategy_and_segments(data, segments):
     stop_price = round(min(sup_price, ma200 * 0.97), -2)
 
     if stage == "Stage 2":
-        conclusion_title = "Stage 2 상승·전환 구간"
-        conclusion_desc = (
-            f"50일선({ma50:,.0f}원)과 200일선({ma200:,.0f}원) 흐름이 우호적입니다. "
-            f"{sell1_price:,.0f}원 돌파 및 지지 여부가 핵심입니다."
+        c_title = "Stage 2 전환 구간"
+        c_body = (
+            f"50일선이 200일선을 상향 돌파하며 상승 추세로 전환하는 구간입니다. "
+            f"{sell1_price:,.0f}원 돌파 여부가 추가 상승의 핵심입니다."
         )
     elif stage == "Stage 3":
-        conclusion_title = "Stage 3 상승 시도·고점 점검 구간"
-        conclusion_desc = (
-            f"상승 시도가 이어지고 있으나 {sell1_price:,.0f}원 부근 저항과 "
-            f"50일선({ma50:,.0f}원) 지지 여부를 함께 확인해야 합니다."
+        c_title = "Stage 3 상승 시도 구간"
+        c_body = (
+            f"50일선 상승 시도 및 고점권 수급 점검 구간입니다. "
+            f"{sell1_price:,.0f}원 저항과 50일선({buy2_price:,.0f}원) 지지를 함께 확인하세요."
         )
     elif stage == "Stage 4":
-        conclusion_title = "Stage 4 하락·재하락 주의 구간"
-        conclusion_desc = (
-            f"추세 약화 구간으로 {stop_price:,.0f}원 이탈 여부와 "
-            f"50일선·200일선 추세 전환 신호를 우선 점검해야 합니다."
+        c_title = "Stage 4 하락 주의 구간"
+        c_body = (
+            f"추세 약화 및 재하락 점검 구간입니다. "
+            f"{stop_price:,.0f}원 이탈 여부와 이동평균선 추세 반전을 확인하세요."
         )
     else:
-        conclusion_title = "Stage 1 바닥 형성·횡보 구간"
-        conclusion_desc = (
-            f"바닥 다지기 과정이 진행 중입니다. {buy1_high:,.0f}원 돌파 및 "
-            f"200일선({ma200:,.0f}원) 안착 여부를 확인하세요."
+        c_title = "Stage 1 바닥 형성 구간"
+        c_body = (
+            f"저점권 횡보 및 바닥 다지기 구간입니다. "
+            f"{buy1_high:,.0f}원 돌파와 200일선({ma200:,.0f}원) 안착을 확인하세요."
         )
 
     return {
-        "stage_cards": stage_cards,
-        "buy1": f"{buy1_low:,.0f}~{buy1_high:,.0f}원 구간 진입 및 지지 확인",
-        "buy2": f"50일선({buy2_price:,.0f}원) 지지 확인 시 분할 접근",
-        "sell1": f"단기 목표: {sell1_price:,.0f}원 부근 저항 확인",
-        "sell2": f"추가 목표: {sell2_price:,.0f}원 부근 추세 점검",
-        "stop": f"{stop_price:,.0f}원 이탈 시\n(50일선·200일선 하향 이탈 점검)",
-        "conclusion_title": conclusion_title,
-        "conclusion_desc": conclusion_desc,
+        "stage_items": stage_items,
+        "buy1": f"1차: {buy1_low:,.0f}~{buy1_high:,.0f}원 돌파 후 안착",
+        "buy2": f"2차: 50일선({buy2_price:,.0f}원) 지지 확인 시 추가 매수",
+        "sell1": f"단기 매도: {sell1_price:,.0f}원 부근 저항",
+        "sell2": f"추가 매도: {sell2_price:,.0f}원 부근",
+        "stop_text": f"{stop_price:,.0f}원 이탈 시\n(50일선 하향 이탈 확인)",
+        "conclusion_title": c_title,
+        "conclusion_body": c_body,
     }
 
 
-def render_report_image(df, benchmark, company_name, code):
-    """첨부 이미지 스타일의 밝은 고해상도 분석 리포트 PNG 바이트를 생성합니다."""
-    data = df.copy()
-    data["MA50"] = data["Close"].rolling(50).mean()
-    data["MA200"] = data["Close"].rolling(200).mean()
-    data["Stage"] = classify_stages(data)
+def render_summary_panel_html(panel):
+    """첨부 이미지의 4단 요약 패널 HTML을 생성합니다."""
+    rows_html = []
+    for item in panel["stage_items"]:
+        rows_html.append(
+            f"""
+            <div class="stage-row" style="background-color:{item['row_bg']};">
+                <span class="stage-pill" style="background-color:{item['pill_bg']};">{item['stage']}</span>
+                <span>{item['period']} | {item['desc']}</span>
+            </div>
+            """
+        )
 
-    if not benchmark.empty and "Close" in benchmark.columns:
-        bench_close = benchmark["Close"].reindex(data.index).ffill()
-        rel = data["Close"].div(bench_close)
-        rs_base = rel.rolling(252, min_periods=60).mean()
-        data["MansfieldRS"] = ((rel / rs_base) - 1) * 100
-    else:
-        data["MansfieldRS"] = np.nan
+    return f"""
+    <div class="summary-grid">
+        <div class="summary-card">
+            <div class="summary-card-header">단계별 구간 및 근거</div>
+            <div class="summary-card-body">
+                {''.join(rows_html)}
+            </div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-card-header">매수 / 매도 전략</div>
+            <div class="summary-card-body">
+                <div class="strat-box-buy">
+                    <span class="strat-badge" style="background-color:#16A34A;">매수 지점</span><br>
+                    <span style="color:#15803D; font-weight:700;">✔</span> {panel['buy1']}<br>
+                    <span style="color:#15803D; font-weight:700;">✔</span> {panel['buy2']}
+                </div>
+                <div class="strat-box-sell">
+                    <span class="strat-badge" style="background-color:#DC2626;">매도 지점</span><br>
+                    <span style="color:#DC2626; font-weight:700;">✔</span> {panel['sell1']}<br>
+                    <span style="color:#DC2626; font-weight:700;">✔</span> {panel['sell2']}
+                </div>
+            </div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-card-header">손절 기준</div>
+            <div class="summary-card-body">
+                <div class="stop-center">
+                    <div style="font-size:1.5rem; margin-bottom:4px;">⚠️</div>
+                    <div>{panel['stop_text'].replace(chr(10), '<br>')}</div>
+                </div>
+            </div>
+        </div>
+        <div class="summary-card">
+            <div class="summary-card-header">종합 결론</div>
+            <div class="summary-card-body">
+                <div class="conclusion-title">✔ {panel['conclusion_title']}</div>
+                <div>{panel['conclusion_body']}</div>
+            </div>
+        </div>
+    </div>
+    """
 
-    segments = _build_segments(data["Stage"])
-    info = _build_strategy_and_segments(data, segments)
 
-    fig = plt.figure(figsize=(18, 10.5), dpi=150, facecolor="#FFFFFF")
+def build_full_download_image(data, benchmark, company_name, code, panel):
+    """기존 차트 구성 + 첨부 4단 요약 패널을 합친 다운로드용 PNG 이미지를 생성합니다."""
+    fig = plt.figure(figsize=(18, 12.2), dpi=150, facecolor="#FFFFFF")
 
-    # 1. 상단 타이틀 배너
-    banner_ax = fig.add_axes([0.01, 0.935, 0.98, 0.055])
-    banner_ax.set_facecolor("#1E3A8A")
-    banner_ax.set_xticks([])
-    banner_ax.set_yticks([])
-    for spine in banner_ax.spines.values():
-        spine.set_visible(False)
-
-    banner_ax.text(
-        0.015,
+    # 상단 헤더
+    top_ax = fig.add_axes([0.015, 0.94, 0.97, 0.045])
+    top_ax.axis("off")
+    last_close = float(data["Close"].iloc[-1])
+    last_stage = str(data["Stage"].iloc[-1])
+    top_ax.text(
+        0.0,
         0.5,
-        f"{company_name} ({code}) - 와인스타인 4단계 분석 (50일선 · 200일선 기준)",
-        color="#FFFFFF",
-        fontsize=15,
+        f"{company_name} ({code}) | 현재 {last_stage} | 종가 {last_close:,.0f}원",
+        fontsize=14,
         fontweight="bold",
+        color="#1E3A8A",
         va="center",
-        ha="left",
-    )
-    banner_ax.plot([0.74, 0.77], [0.5, 0.5], color="#60A5FA", lw=2.5, transform=banner_ax.transAxes)
-    banner_ax.text(
-        0.778,
-        0.5,
-        "50일선",
-        color="#FFFFFF",
-        fontsize=11,
-        fontweight="bold",
-        va="center",
-        ha="left",
-    )
-    banner_ax.plot([0.84, 0.87], [0.5, 0.5], color="#EF4444", lw=2.5, transform=banner_ax.transAxes)
-    banner_ax.text(
-        0.878,
-        0.5,
-        "200일선",
-        color="#FFFFFF",
-        fontsize=11,
-        fontweight="bold",
-        va="center",
-        ha="left",
     )
 
-    # 2. 차트 영역 (가격 / 거래량 / Mansfield RS)
+    # 차트 영역 (가격 / 거래량 / Mansfield RS)
     gs = fig.add_gridspec(
         nrows=3,
         ncols=1,
-        left=0.015,
-        right=0.935,
-        top=0.875,
+        left=0.05,
+        right=0.97,
+        top=0.91,
         bottom=0.33,
-        height_ratios=[4.2, 1.0, 1.6],
+        height_ratios=[4.0, 1.0, 1.4],
         hspace=0.14,
     )
-    ax_price = fig.add_subplot(gs[0])
-    ax_vol = fig.add_subplot(gs[1], sharex=ax_price)
-    ax_rs = fig.add_subplot(gs[2], sharex=ax_price)
+    ax1 = fig.add_subplot(gs[0])
+    ax2 = fig.add_subplot(gs[1], sharex=ax1)
+    ax3 = fig.add_subplot(gs[2], sharex=ax1)
 
-    for ax in (ax_price, ax_vol, ax_rs):
+    for ax in (ax1, ax2, ax3):
         ax.set_facecolor("#FFFFFF")
-        ax.yaxis.tick_right()
-        ax.yaxis.set_label_position("right")
-        ax.grid(True, linestyle=":", alpha=0.45, color="#94A3B8")
-        ax.tick_params(axis="both", colors="#334155", labelsize=9)
-        ax.spines["top"].set_visible(False)
-        ax.spines["left"].set_visible(False)
-        ax.spines["right"].set_color("#CBD5E1")
-        ax.spines["bottom"].set_color("#CBD5E1")
+        ax.grid(True, linestyle=":", alpha=0.5, color="#CBD5E1")
+        ax.tick_params(colors="#334155", labelsize=9)
 
-    # 단계별 배경 음영 및 상단 헤더 뱃지
-    valid_segs = [s for s in segments if s[2] in STAGE_META]
-    s1_cnt, s4_cnt = 0, 0
-    for dt0, dt1, stg in valid_segs:
-        meta = STAGE_META[stg]
-        ax_price.axvspan(dt0, dt1, color=meta["bg"], alpha=0.55, zorder=0)
-        ax_vol.axvspan(dt0, dt1, color=meta["bg"], alpha=0.30, zorder=0)
-        ax_rs.axvspan(dt0, dt1, color=meta["bg"], alpha=0.25, zorder=0)
+    for dt0, dt1, stg in _get_segments(data["Stage"]):
+        if stg in STAGE_STYLE:
+            ax1.axvspan(dt0, dt1, color=STAGE_STYLE[stg]["row_bg"], alpha=0.85, zorder=0)
 
-        if stg == "Stage 1":
-            s1_cnt += 1
-            title_txt = f"Stage 1\n({meta['short'] if s1_cnt == 1 else meta['re_short']})"
-        elif stg == "Stage 4":
-            s4_cnt += 1
-            title_txt = f"Stage 4\n({meta['short'] if s4_cnt == 1 else meta['re_short']})"
-        else:
-            title_txt = f"{stg}\n({meta['short']})"
-
-        mid_dt = dt0 + (dt1 - dt0) / 2
-        ax_price.text(
-            mid_dt,
-            1.02,
-            title_txt,
-            transform=ax_price.get_xaxis_transform(),
-            ha="center",
-            va="bottom",
-            fontsize=9.5,
-            fontweight="bold",
-            color="#FFFFFF",
-            bbox=dict(
-                boxstyle="round,pad=0.35",
-                facecolor=meta["header"],
-                edgecolor="none",
-            ),
-        )
-
-    # 캔들스틱 그리기 (성능을 위해 고해상도 라인+고저 바 조합)
     dates = data.index
     opens = data["Open"].values
     highs = data["High"].values
     lows = data["Low"].values
     closes = data["Close"].values
-    up_mask = closes >= opens
+    up = closes >= opens
 
-    ax_price.vlines(dates[up_mask], lows[up_mask], highs[up_mask], color="#16A34A", lw=0.8, zorder=2)
-    ax_price.vlines(dates[up_mask], opens[up_mask], closes[up_mask], color="#16A34A", lw=2.0, zorder=3)
-    ax_price.vlines(dates[~up_mask], lows[~up_mask], highs[~up_mask], color="#DC2626", lw=0.8, zorder=2)
-    ax_price.vlines(dates[~up_mask], closes[~up_mask], opens[~up_mask], color="#DC2626", lw=2.0, zorder=3)
+    ax1.vlines(dates[up], lows[up], highs[up], color="#16A6A0", lw=0.8, zorder=2)
+    ax1.vlines(dates[up], opens[up], closes[up], color="#16A6A0", lw=2.0, zorder=3)
+    ax1.vlines(dates[~up], lows[~up], highs[~up], color="#E45B63", lw=0.8, zorder=2)
+    ax1.vlines(dates[~up], closes[~up], opens[~up], color="#E45B63", lw=2.0, zorder=3)
+    ax1.plot(dates, data["MA50"], color="#2474FF", lw=1.8, label="50일선", zorder=4)
+    ax1.plot(dates, data["MA200"], color="#FF334D", lw=2.0, label="200일선", zorder=4)
+    ax1.set_ylabel("가격 (원)", fontsize=9.5, color="#1E293B")
+    ax1.legend(loc="upper left", frameon=True, facecolor="#FFFFFF", edgecolor="#CBD5E1")
 
-    ax_price.plot(dates, data["MA50"], color="#2563EB", lw=1.8, label="50일선", zorder=4)
-    ax_price.plot(dates, data["MA200"], color="#DC2626", lw=2.0, label="200일선", zorder=4)
+    vol_colors = np.where(up, "#16A6A0", "#E45B63")
+    ax2.bar(dates, data["Volume"].values, color=vol_colors, width=1.0, alpha=0.85)
+    ax2.set_ylabel("거래량", fontsize=9.5, color="#1E293B")
 
-    # 차트 내 주요 추세 주석 박스
-    if len(data) > 60:
-        idx_q1 = dates[int(len(data) * 0.12)]
-        y_q1 = float(data["Close"].iloc[int(len(data) * 0.12)])
-        ax_price.annotate(
-            "고점과 저점이\n계속 낮아짐\n(추세 점검 구간)",
-            xy=(idx_q1, y_q1),
-            xytext=(idx_q1, y_q1 * 1.18),
-            ha="center",
-            fontsize=8.5,
-            fontweight="bold",
-            color="#1E293B",
-            bbox=dict(boxstyle="round,pad=0.3", fc="#FFFFFF", ec="#94A3B8", alpha=0.92),
-            arrowprops=dict(arrowstyle="->", color="#475569", lw=1.2),
-        )
+    ax3.plot(dates, data["MansfieldRS"], color="#333333", lw=1.3, label="Mansfield RS")
+    ax3.axhline(0, color="#246BFF", ls="--", lw=1.0)
+    ax3.set_ylabel("RS (%)", fontsize=9.5, color="#1E293B")
 
-        idx_q3 = dates[int(len(data) * 0.45)]
-        y_q3 = float(data["MA200"].dropna().iloc[int(len(data["MA200"].dropna()) * 0.45)]) if not data["MA200"].dropna().empty else float(closes.mean())
-        ax_price.text(
-            idx_q3,
-            y_q3 * 1.15,
-            "50일선 · 200일선 추세 교차 점검",
-            ha="center",
-            fontsize=8.5,
-            fontweight="bold",
-            color="#1E293B",
-            bbox=dict(boxstyle="round,pad=0.3", fc="#FFFFFF", ec="#94A3B8", alpha=0.92),
-        )
-
-    # 우측 현재가 / 50일선 / 200일선 라벨 뱃지
-    last_close = float(closes[-1])
-    prev_close = float(closes[-2]) if len(closes) > 1 else last_close
-    pct_chg = ((last_close / prev_close) - 1) * 100 if prev_close else 0.0
-    last_ma50 = float(data["MA50"].iloc[-1]) if pd.notna(data["MA50"].iloc[-1]) else last_close
-    last_ma200 = float(data["MA200"].iloc[-1]) if pd.notna(data["MA200"].iloc[-1]) else last_close
-
-    x_end = dates[-1]
-    ax_price.text(
-        x_end,
-        last_close,
-        f" {last_close:,.0f}\n ({pct_chg:+.2f}%)",
-        va="center",
-        ha="left",
-        fontsize=8,
-        fontweight="bold",
-        color="#FFFFFF",
-        bbox=dict(boxstyle="round,pad=0.2", fc="#16A34A" if pct_chg >= 0 else "#DC2626", ec="none"),
-        clip_on=False,
-    )
-    ax_price.text(
-        x_end,
-        last_ma50,
-        f" {last_ma50:,.0f}\n (50일선)",
-        va="center",
-        ha="left",
-        fontsize=7.5,
-        fontweight="bold",
-        color="#FFFFFF",
-        bbox=dict(boxstyle="round,pad=0.18", fc="#2563EB", ec="none"),
-        clip_on=False,
-    )
-    ax_price.text(
-        x_end,
-        last_ma200,
-        f" {last_ma200:,.0f}\n (200일선)",
-        va="center",
-        ha="left",
-        fontsize=7.5,
-        fontweight="bold",
-        color="#FFFFFF",
-        bbox=dict(boxstyle="round,pad=0.18", fc="#DC2626", ec="none"),
-        clip_on=False,
-    )
-
-    # 거래량 패널
-    vol_colors = np.where(up_mask, "#16A34A", "#DC2626")
-    ax_vol.bar(dates, data["Volume"].values, color=vol_colors, width=1.0, alpha=0.85)
-    ax_vol.text(
-        0.01,
-        0.82,
-        "거래량",
-        transform=ax_vol.transAxes,
-        fontsize=9,
-        fontweight="bold",
-        color="#1E293B",
-        bbox=dict(boxstyle="round,pad=0.2", fc="#F1F5F9", ec="#CBD5E1"),
-    )
-
-    # Mansfield RS 패널
-    ax_rs.plot(dates, data["MansfieldRS"], color="#1E293B", lw=1.3)
-    ax_rs.axhline(0, color="#2563EB", ls="--", lw=1.0)
-    ax_rs.text(
-        0.01,
-        0.78,
-        "Mansfield RS (KOSPI 상대강도 기준)",
-        transform=ax_rs.transAxes,
-        fontsize=8.5,
-        fontweight="bold",
-        color="#1E293B",
-        bbox=dict(boxstyle="round,pad=0.2", fc="#F1F5F9", ec="#CBD5E1"),
-    )
-
-    # 3. 하단 4단 분석 카드 영역
-    card_specs = [
-        (0.015, 0.245, "단계별 구간 및 근거", "#1E3A8A"),
-        (0.262, 0.245, "매수 / 매도 전략", "#1E3A8A"),
-        (0.517, 0.185, "손절 기준", "#1E3A8A"),
-        (0.712, 0.223, "종합 결론", "#1E3A8A"),
+    # 하단 4단 요약 패널 (첨부 이미지와 동일한 4개 카드)
+    cards = [
+        (0.015, 0.275, "단계별 구간 및 근거"),
+        (0.298, 0.255, "매수 / 매도 전략"),
+        (0.561, 0.175, "손절 기준"),
+        (0.744, 0.241, "종합 결론"),
     ]
-
-    for x0, w, card_title, hdr_col in card_specs:
-        cax = fig.add_axes([x0, 0.02, w, 0.255])
+    for x0, w, title in cards:
+        cax = fig.add_axes([x0, 0.025, w, 0.255])
         cax.set_facecolor("#FFFFFF")
         cax.set_xticks([])
         cax.set_yticks([])
         for sp in cax.spines.values():
-            sp.set_color("#CBD5E1")
-            sp.set_linewidth(1.0)
+            sp.set_color("#1E3A8A")
+            sp.set_linewidth(1.3)
 
-        # 카드 헤더 바
-        hdr = mpatches.FancyBboxPatch(
-            (0.0, 0.80),
-            1.0,
-            0.20,
-            boxstyle="square,pad=0",
-            facecolor=hdr_col,
-            edgecolor="none",
-            transform=cax.transAxes,
+        cax.add_patch(
+            mpatches.Rectangle((0, 0.81), 1, 0.19, facecolor="#1E3A8A", edgecolor="none", transform=cax.transAxes)
         )
-        cax.add_patch(hdr)
-        cax.text(
-            0.04,
-            0.90,
-            card_title,
-            color="#FFFFFF",
-            fontsize=10.5,
-            fontweight="bold",
-            va="center",
-            ha="left",
-            transform=cax.transAxes,
-        )
+        cax.text(0.03, 0.905, title, color="#FFFFFF", fontsize=10, fontweight="bold", va="center", transform=cax.transAxes)
 
-        if card_title == "단계별 구간 및 근거":
-            y_pos = 0.70
-            for lbl, sub, bcol, prd, rsn in info["stage_cards"]:
-                cax.text(
-                    0.04,
-                    y_pos,
-                    f" {lbl} ",
-                    color="#FFFFFF",
-                    fontsize=7.5,
-                    fontweight="bold",
-                    va="center",
-                    bbox=dict(boxstyle="round,pad=0.18", fc=bcol, ec="none"),
+        if title == "단계별 구간 및 근거":
+            y = 0.71
+            for it in panel["stage_items"]:
+                cax.add_patch(
+                    mpatches.FancyBboxPatch(
+                        (0.03, y - 0.045),
+                        0.17,
+                        0.085,
+                        boxstyle="round,pad=0.01",
+                        facecolor=it["pill_bg"],
+                        edgecolor="none",
+                        transform=cax.transAxes,
+                    )
                 )
-                cax.text(
-                    0.23,
-                    y_pos,
-                    f"{prd} | {rsn}",
-                    color="#1E293B",
-                    fontsize=7.5,
-                    va="center",
-                )
-                y_pos -= 0.125
+                cax.text(0.115, y, it["stage"], color="#FFFFFF", fontsize=7.5, fontweight="bold", ha="center", va="center", transform=cax.transAxes)
+                cax.text(0.22, y, f"{it['period']} | {it['desc']}", color="#1E293B", fontsize=7.5, va="center", transform=cax.transAxes)
+                y -= 0.125
 
-        elif card_title == "매수 / 매도 전략":
-            cax.text(
-                0.04,
-                0.68,
-                "매수 지점",
-                color="#FFFFFF",
-                fontsize=8.5,
-                fontweight="bold",
-                va="center",
-                bbox=dict(boxstyle="round,pad=0.2", fc="#16A34A", ec="none"),
-            )
-            cax.text(
-                0.04,
-                0.54,
-                f"• 1차: {info['buy1']}",
-                color="#1E293B",
-                fontsize=8.3,
-                va="center",
-            )
-            cax.text(
-                0.04,
-                0.42,
-                f"• 2차: {info['buy2']}",
-                color="#1E293B",
-                fontsize=8.3,
-                va="center",
-            )
-            cax.text(
-                0.04,
-                0.28,
-                "매도 지점",
-                color="#FFFFFF",
-                fontsize=8.5,
-                fontweight="bold",
-                va="center",
-                bbox=dict(boxstyle="round,pad=0.2", fc="#DC2626", ec="none"),
-            )
-            cax.text(
-                0.04,
-                0.15,
-                f"• {info['sell1']}\n• {info['sell2']}",
-                color="#1E293B",
-                fontsize=8.2,
-                va="center",
-            )
+        elif title == "매수 / 매도 전략":
+            cax.text(0.04, 0.69, " 매수 지점 ", color="#FFFFFF", fontsize=8, fontweight="bold", va="center",
+                     bbox=dict(boxstyle="round,pad=0.2", fc="#16A34A", ec="none"), transform=cax.transAxes)
+            cax.text(0.04, 0.56, f"✔ {panel['buy1']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
+            cax.text(0.04, 0.44, f"✔ {panel['buy2']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
 
-        elif card_title == "손절 기준":
-            cax.text(
-                0.5,
-                0.42,
-                f"⚠  {info['stop']}",
-                color="#1E293B",
-                fontsize=9.5,
-                fontweight="bold",
-                ha="center",
-                va="center",
-            )
+            cax.text(0.04, 0.29, " 매도 지점 ", color="#FFFFFF", fontsize=8, fontweight="bold", va="center",
+                     bbox=dict(boxstyle="round,pad=0.2", fc="#DC2626", ec="none"), transform=cax.transAxes)
+            cax.text(0.04, 0.16, f"✔ {panel['sell1']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
+            cax.text(0.04, 0.05, f"✔ {panel['sell2']}", color="#1E293B", fontsize=8, va="center", transform=cax.transAxes)
 
-        elif card_title == "종합 결론":
-            cax.text(
-                0.05,
-                0.64,
-                f"✔ {info['conclusion_title']}",
-                color="#15803D",
-                fontsize=11,
-                fontweight="bold",
-                ha="left",
-                va="center",
-            )
-            cax.text(
-                0.05,
-                0.34,
-                info["conclusion_desc"],
-                color="#1E293B",
-                fontsize=8.8,
-                ha="left",
-                va="center",
-                wrap=True,
-            )
+        elif title == "손절 기준":
+            cax.text(0.5, 0.42, f"⚠️\n{panel['stop_text']}", color="#1E293B", fontsize=9.5, fontweight="bold",
+                     ha="center", va="center", transform=cax.transAxes)
+
+        elif title == "종합 결론":
+            cax.text(0.04, 0.65, f"✔ {panel['conclusion_title']}", color="#15803D", fontsize=10.5, fontweight="bold",
+                     ha="left", va="center", transform=cax.transAxes)
+            cax.text(0.04, 0.34, panel["conclusion_body"], color="#1E293B", fontsize=8.5,
+                     ha="left", va="center", wrap=True, transform=cax.transAxes)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=150, facecolor="#FFFFFF")
     plt.close(fig)
     buf.seek(0)
-    return buf.getvalue(), data, info
+    return buf.getvalue()
 
 
 def render():
-    _apply_bright_theme()
-
-    st.markdown(
-        """
-        <div class="bright-info-card">
-            <h2 style="margin:0 0 6px 0; color:#1E3A8A;">📈 스탠 와인스타인 4단계 주식 분석기</h2>
-            <p style="margin:0; color:#475569; font-size:0.95rem;">
-                50일선 · 200일선 · 거래량 · Mansfield 상대강도 기준 | 밝은 리포트 생성 및 PNG 이미지 다운로드 지원
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    _apply_bright_style()
+    st.title("스탠 와인스타인 4단계 주식 분석기")
+    st.caption("50일선·200일선 기준 | 단계별 음영 | 거래량 | Mansfield 상대강도")
 
     with st.sidebar:
         st.header("분석 설정")
         years = st.selectbox("조회 기간", [3, 5, 7, 10], index=1)
-        st.caption("일봉 데이터 기준이며 200일선 계산을 위해 충분한 거래일 데이터가 필요합니다.")
+        st.caption("일봉 데이터 기준이며 200일선 계산을 위해 최소 1년 이상의 데이터가 필요합니다.")
         st.markdown("---")
-        st.caption("중복 기업명을 허용하며, 입력한 순서대로 각각 결과를 생성합니다.")
+        st.caption("중복 기업명은 제거하지 않습니다. 같은 이름을 여러 줄에 입력하면 각각 분석합니다.")
 
     st.markdown("**기업명을 입력하세요. 한 줄에 하나씩 입력하며, 중복 입력도 가능합니다.**")
     companies_text = st.text_area(
         "기업명 목록",
-        value="스튜디오드래곤\n삼성전자",
-        height=110,
-        help="예: 스튜디오드래곤 / 삼성전자 (중복 입력 가능)",
+        value="스튜디오드래곤\n삼성전자\n스튜디오드래곤",
+        height=130,
+        help="예: 삼성전자 / SK하이닉스 / 삼성전자 (중복 허용)",
     )
-    run = st.button("분석 및 리포트 이미지 생성", type="primary", use_container_width=True)
+    run = st.button("분석 및 차트 생성", type="primary", use_container_width=True)
 
     if run:
         names = [x.strip() for x in companies_text.splitlines() if x.strip()]
@@ -727,7 +754,7 @@ def render():
         with st.spinner("KRX 종목 목록을 불러오는 중..."):
             listing = load_listing()
 
-        start = (date.today() - timedelta(days=365 * years + 120)).isoformat()
+        start = (date.today() - timedelta(days=365 * years + 100)).isoformat()
 
         for idx, name in enumerate(names, start=1):
             st.divider()
@@ -735,20 +762,16 @@ def render():
             resolved = resolve_company(name, listing)
 
             if isinstance(resolved, tuple):
-                st.warning(
-                    f"'{name}'과 일치하는 종목이 여러 개입니다. 아래에서 종목코드를 확인한 뒤 정확한 종목명을 입력해 주세요."
-                )
+                st.warning(f"'{name}'과 일치하는 종목이 여러 개입니다. 아래에서 종목코드를 확인한 뒤 정확한 종목명으로 다시 입력해 주세요.")
                 st.dataframe(resolved[1], use_container_width=True)
                 continue
             if resolved is None:
-                st.error(
-                    f"'{name}' 종목을 KRX 목록에서 찾지 못했습니다. 정식 기업명 또는 6자리 종목코드를 입력해 주세요."
-                )
+                st.error(f"'{name}' 종목을 KRX 목록에서 찾지 못했습니다. 정식 기업명 또는 6자리 종목코드를 입력해 주세요.")
                 continue
 
             company = resolved["Name"]
             code = resolved["Code"]
-            with st.spinner(f"{company} ({code}) 데이터 및 분석 이미지를 생성하는 중..."):
+            with st.spinner(f"{company} ({code}) 가격 데이터를 불러오는 중..."):
                 price = load_price(code, start)
                 benchmark = load_benchmark(start)
 
@@ -756,32 +779,33 @@ def render():
                 st.error("가격 데이터를 가져오지 못했습니다.")
                 continue
 
-            png_bytes, analyzed, info = render_report_image(price, benchmark, company, code)
+            fig, analyzed, summary = build_chart(price, benchmark, company, code)
+            panel = make_summary_panel_data(analyzed, summary)
+            full_png = build_full_download_image(analyzed, benchmark, company, code, panel)
 
-            # 화면에 밝은 리포트 이미지 표시
-            st.image(
-                png_bytes,
-                caption=f"{company} ({code}) 와인스타인 4단계 분석 리포트",
-                use_container_width=True,
-            )
+            # 1) 기존 Plotly 차트 출력
+            st.plotly_chart(fig, use_container_width=True)
 
-            # 이미지 파일(PNG) 및 CSV 다운로드 버튼
-            safe_name = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", company)
-            col_dl1, col_dl2 = st.columns(2)
-            with col_dl1:
+            # 2) 첨부 이미지의 4단 요약 패널 출력
+            st.markdown(render_summary_panel_html(panel), unsafe_allow_html=True)
+
+            # 3) 이미지(PNG) 및 CSV 다운로드 버튼
+            safe = re.sub(r"[^0-9A-Za-z가-힣_-]+", "_", company)
+            col1, col2 = st.columns(2)
+            with col1:
                 st.download_button(
-                    label=f"🖼️ {idx}번 {company} 분석 결과 이미지(PNG) 다운로드",
-                    data=png_bytes,
-                    file_name=f"{idx:02d}_{safe_name}_{code}_weinstein.png",
+                    f"🖼️ {idx}번 {company} 전체 결과 이미지(PNG) 다운로드",
+                    data=full_png,
+                    file_name=f"{idx:02d}_{safe}_{code}_weinstein.png",
                     mime="image/png",
                     key=f"png_{idx}_{code}",
                     use_container_width=True,
                 )
-            with col_dl2:
+            with col2:
                 st.download_button(
-                    label=f"📄 {idx}번 {company} 분석 데이터(CSV) 다운로드",
+                    f"📄 {idx}번 {company} 분석 데이터(CSV) 다운로드",
                     data=analyzed.to_csv(encoding="utf-8-sig").encode("utf-8-sig"),
-                    file_name=f"{idx:02d}_{safe_name}_{code}_weinstein.csv",
+                    file_name=f"{idx:02d}_{safe}_{code}.csv",
                     mime="text/csv",
                     key=f"csv_{idx}_{code}",
                     use_container_width=True,
@@ -789,6 +813,7 @@ def render():
 
     st.markdown("---")
     st.caption(
-        "면책: 본 프로그램은 공개 가격 데이터와 일봉 50/200일선 규칙을 이용한 교육·참고용 도구입니다. "
-        "스탠 와인스타인의 원래 주봉 30주선 규칙과는 차이가 있으며 투자 판단 및 수익을 보장하지 않습니다."
+        "면책: 본 프로그램은 공개 가격 데이터와 단순 규칙을 이용한 교육·참고용 도구입니다. "
+        "50/200일선 방식은 스탠 와인스타인의 원래 주봉 30주 이동평균 규칙과 다릅니다. "
+        "단계 분류는 자동화된 근사치이며 투자 판단이나 수익을 보장하지 않습니다."
     )
