@@ -84,6 +84,9 @@ etf_tickers = {
 
     #로봇
     "0177X0.KS": "ACE K휴머노이드로봇산업TOP2+",
+    
+    #우주항공
+    "0207G0.KS": "SOL 우주항공밸류체인",
 }
 
 @st.cache_data(ttl=300)
