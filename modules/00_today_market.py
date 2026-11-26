@@ -1,6 +1,7 @@
 # modules/00_today_market.py
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import requests
@@ -351,12 +352,12 @@ def _get_etf_returns_and_names(
     return returns, resolved_names
 
 
-def _load_etf_history_safely(tickers: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
+def _load_etf_history_safely(tickers: list[str], period: str = "2y") -> tuple[pd.DataFrame, dict[str, str]]:
     """download_etf_data를 호출하되, 빈 결과나 예외가 발생해도 안전하게 처리"""
     df_raw = pd.DataFrame()
     name_map: dict[str, str] = {}
     try:
-        res = download_etf_data(tickers, period="10d")
+        res = download_etf_data(tickers, period=period)
         if isinstance(res, tuple) and len(res) >= 2:
             if isinstance(res[0], pd.DataFrame):
                 df_raw = res[0].copy()
@@ -370,6 +371,99 @@ def _load_etf_history_safely(tickers: list[str]) -> tuple[pd.DataFrame, dict[str
     if not df_raw.empty:
         df_raw.index = pd.to_datetime(df_raw.index)
     return df_raw, name_map
+
+
+def _sortino_from_returns(ret: pd.Series, mar: float = 0.0, periods_per_year: int = 252) -> float:
+    """일간 수익률 시리즈 기준 연율화 Sortino Ratio 계산"""
+    ret = ret.dropna()
+    if len(ret) < 5:
+        return np.nan
+    mar_daily = (1 + mar) ** (1 / periods_per_year) - 1
+    excess = ret - mar_daily
+    downside = excess[excess < 0]
+    if len(downside) < 2:
+        return np.nan
+    downside_dev = downside.std(ddof=1) * np.sqrt(periods_per_year)
+    if downside_dev == 0 or np.isnan(downside_dev):
+        return np.nan
+    return float(excess.mean() * periods_per_year / downside_dev)
+
+
+def _get_sortino_ma20_timeline_desc(
+    price_df: pd.DataFrame,
+    name_map: dict[str, str],
+    last_n_days: int = 10,
+    ma_filter_days: int = 20,
+    top_n: int = 20,
+) -> pd.DataFrame:
+    """
+    Sortino Ratio 기반 필터링 타임라인 → 이동평균선 20일 조건 충족군 계산 후
+    날짜 기준 최근순(내림차순)으로 정렬된 DataFrame 반환
+    """
+    if price_df.empty:
+        return pd.DataFrame()
+
+    clean_df = price_df.drop(columns=["^KS11", "코스피"], errors="ignore").ffill()
+    valid_days = clean_df.dropna(how="all").index
+    if len(valid_days) == 0:
+        return pd.DataFrame()
+
+    trading_days = valid_days[-last_n_days:]
+    wins = [63, 126, 252]
+    daily_top: dict[str, list[str]] = {}
+
+    for day in trading_days:
+        end_idx = clean_df.index.get_indexer_for([day])[0]
+        scores: dict[str, float] = {}
+
+        for col in clean_df.columns:
+            s = clean_df[col].iloc[: end_idx + 1].dropna()
+            if len(s) < ma_filter_days:
+                continue
+            ma_val = s.rolling(ma_filter_days).mean().iloc[-1]
+            if pd.isna(ma_val) or s.iloc[-1] < ma_val:
+                continue
+
+            vals = []
+            for win in wins:
+                start_idx = max(0, end_idx - (win - 1))
+                w_prices = clean_df[col].iloc[start_idx : end_idx + 1].dropna()
+                if len(w_prices) < 15:
+                    continue
+                v = _sortino_from_returns(w_prices.pct_change().dropna())
+                if pd.notna(v):
+                    vals.append(v)
+
+            if vals:
+                scores[col] = float(np.mean(vals))
+
+        if scores:
+            ranked_tickers = (
+                pd.Series(scores).sort_values(ascending=False).head(top_n).index.tolist()
+            )
+            ranked_names = [
+                _clean_etf_name(name_map.get(t), t) for t in ranked_tickers
+            ]
+        else:
+            ranked_names = []
+
+        while len(ranked_names) < top_n:
+            ranked_names.append("")
+
+        daily_top[day.strftime("%Y-%m-%d")] = ranked_names
+
+    if not daily_top:
+        return pd.DataFrame()
+
+    df_timeline = pd.DataFrame.from_dict(
+        daily_top,
+        orient="index",
+        columns=[f"Top {i + 1}" for i in range(top_n)],
+    )
+    df_timeline.index.name = "Date"
+    # 날짜 기준 최근순 정렬
+    df_timeline = df_timeline.sort_index(ascending=False)
+    return df_timeline
 
 
 def render():
@@ -387,7 +481,7 @@ def render():
     normalized_tickers, pre_names = _normalize_tickers_and_names(etf_tickers, {})
 
     with st.spinner(f"{run_timestamp} 기준 최신 시장 및 ETF 시세 데이터를 가져오는 중입니다..."):
-        df_raw, mapped_from_dl = _load_etf_history_safely(normalized_tickers)
+        df_raw, mapped_from_dl = _load_etf_history_safely(normalized_tickers, period="2y")
         _, merged_names = _normalize_tickers_and_names(etf_tickers, {**pre_names, **mapped_from_dl})
 
         index_tickers = {"^KS11": "코스피 (KOSPI)", "^KQ11": "코스닥 (KOSDAQ)"}
@@ -563,3 +657,23 @@ def render():
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    # --------------------------------------------------------------------------
+    # 비트맵(트리맵) 아래: Sortino Ratio 기반 필터링 타임라인 → 이동평균선 20일 조건 충족군
+    # --------------------------------------------------------------------------
+    st.markdown("---")
+    st.markdown("### Sortino Ratio 기반 필터링 타임라인")
+    st.markdown("→ 이동평균선 20일 조건 충족군")
+
+    df_sortino_ma20 = _get_sortino_ma20_timeline_desc(
+        price_df=df_raw,
+        name_map=etf_names if etf_names else merged_names,
+        last_n_days=10,
+        ma_filter_days=20,
+        top_n=20,
+    )
+
+    if df_sortino_ma20.empty:
+        st.info("Sortino Ratio(20일 이동평균선 충족군) 타임라인을 계산할 과거 시세 데이터가 부족합니다.")
+    else:
+        st.dataframe(df_sortino_ma20, use_container_width=True)
