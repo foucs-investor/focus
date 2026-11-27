@@ -108,7 +108,6 @@ def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
         for keyword in [
             "k-pop",
             "kpop",
-            "포커스",
             "엔터",
             "미디어",
             "게임",
