@@ -1,0 +1,575 @@
+# modules/11_sector_price_stage.py
+from datetime import datetime
+from io import BytesIO
+from zoneinfo import ZoneInfo
+
+import matplotlib.dates as mdates
+import matplotlib.font_manager as fm
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+import yfinance as yf
+from utils import clean_theme_name, download_etf_data, etf_tickers
+
+# 사이드바 라디오 버튼에 표시될 메뉴명
+MENU_NAME = "섹터별 주식단계"
+KST = ZoneInfo("Asia/Seoul")
+
+
+def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
+    """티커, 전체 종목명, 세부 테마명을 기반으로 상위 대분류 테마로 묶어주는 함수"""
+    lower_name = (full_name or "").lower()
+    lower_theme = (theme_name or "").lower()
+
+    if ticker in ["^KS11", "^KQ11"]:
+        return "시장 지표 (KOSPI/KOSDAQ)"
+
+    if any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["화장품", "k뷰티", "k-뷰티", "뷰티", "푸드"]
+    ):
+        return "화장품/음식료"
+
+    elif ticker == "475050.KS" or any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in [
+            "k-pop",
+            "kpop",
+            "포커스",
+            "엔터",
+            "미디어",
+            "게임",
+            "컨텐츠",
+            "웹툰",
+            "플랫폼",
+            "인터넷",
+            "포털",
+        ]
+    ):
+        return "엔터/컨텐츠/인터넷"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["반도체", "소부장", "후공정", "장비", "메모리"]
+    ):
+        return "반도체"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["증권", "은행", "금융", "보험", "지주사"]
+    ):
+        return "금융"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["바이오", "헬스케어", "제약", "의료기기", "의료"]
+    ):
+        return "바이오/헬스케어"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["인공지능", "소프트웨어", "클라우드", "software", "보안", "it"]
+    ):
+        return "IT·소프트웨어"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["조선", "방산", "우주", "항공"]
+    ):
+        return "조선/방산"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme for keyword in ["친환경"]
+    ):
+        return "친환경에너지"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["생활소비", "경기소비"]
+    ):
+        return "소비재"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["건설", "설비", "원자력"]
+    ):
+        return "AIDC"
+
+    elif any(
+        keyword in lower_name or keyword in lower_theme
+        for keyword in ["로봇", "자동차", "2차전지", "배터리", "전기차", "lfp", "양극재"]
+    ):
+        return "로봇/자동차/2차전지"
+
+    return theme_name
+
+
+def _clean_etf_name(raw_name: str | None, ticker: str) -> str:
+    """티커 대신 화면에 표시할 깔끔한 ETF명 반환"""
+    if raw_name and isinstance(raw_name, str):
+        name = raw_name.strip()
+        if name and name.upper() != str(ticker).upper():
+            return name
+    return str(ticker)
+
+
+def _normalize_tickers_and_names(tickers_obj, name_mapping_obj) -> tuple[list[str], dict[str, str]]:
+    """etf_tickers와 name_mapping을 정규화해 (티커 리스트, {티커/코드: ETF명}) 반환"""
+    normalized_tickers: list[str] = []
+    normalized_names: dict[str, str] = {}
+
+    if isinstance(name_mapping_obj, dict):
+        for k, v in name_mapping_obj.items():
+            if k is not None and v:
+                k_str = str(k).strip()
+                v_str = str(v).strip()
+                normalized_names[k_str] = v_str
+                normalized_names[k_str.replace(".KS", "").replace(".KQ", "")] = v_str
+
+    if isinstance(tickers_obj, dict):
+        for k, v in tickers_obj.items():
+            t_str = str(k).strip()
+            if t_str:
+                normalized_tickers.append(t_str)
+                if v:
+                    v_str = str(v).strip()
+                    if t_str not in normalized_names:
+                        normalized_names[t_str] = v_str
+                    short_k = t_str.replace(".KS", "").replace(".KQ", "")
+                    if short_k not in normalized_names:
+                        normalized_names[short_k] = v_str
+    elif isinstance(tickers_obj, (list, tuple, set)):
+        for item in tickers_obj:
+            t_str = str(item).strip()
+            if t_str:
+                normalized_tickers.append(t_str)
+
+    unique_tickers = list(dict.fromkeys(normalized_tickers))
+    return unique_tickers, normalized_names
+
+
+def _extract_close_df(raw_obj) -> pd.DataFrame:
+    """종가 DataFrame을 2차원 (날짜 x 종목) 형태로 정규화"""
+    if not isinstance(raw_obj, pd.DataFrame) or raw_obj.empty:
+        return pd.DataFrame()
+
+    df_out = raw_obj.copy()
+    if isinstance(df_out.columns, pd.MultiIndex):
+        level_0 = set(df_out.columns.get_level_values(0))
+        if "Close" in level_0:
+            df_out = df_out["Close"].copy()
+        elif "Adj Close" in level_0:
+            df_out = df_out["Adj Close"].copy()
+        else:
+            df_out.columns = df_out.columns.get_level_values(-1)
+
+    df_out.index = pd.to_datetime(df_out.index)
+    df_out = df_out.loc[~df_out.index.duplicated(keep="last")].sort_index()
+    return df_out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_2y_etf_prices(tickers: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
+    """최근 2년치 ETF 일봉 종가 데이터 다운로드 (utils.download_etf_data 우선 -> yfinance 폴백)"""
+    df_raw = pd.DataFrame()
+    name_map: dict[str, str] = {}
+
+    try:
+        res = download_etf_data(tickers, period="2y")
+        if isinstance(res, tuple) and len(res) >= 2:
+            df_raw = _extract_close_df(res[0])
+            if isinstance(res[1], dict):
+                name_map = {str(k): str(v) for k, v in res[1].items() if k and v}
+        elif isinstance(res, pd.DataFrame):
+            df_raw = _extract_close_df(res)
+    except Exception:
+        pass
+
+    if df_raw.empty or len(df_raw.dropna(how="all")) < 120:
+        try:
+            dl = yf.download(tickers, period="2y", auto_adjust=True, progress=False)
+            fallback_df = _extract_close_df(dl)
+            if not fallback_df.empty and len(fallback_df.dropna(how="all")) > len(df_raw.dropna(how="all")):
+                df_raw = fallback_df
+        except Exception:
+            pass
+
+    if not df_raw.empty:
+        df_raw = df_raw.drop(columns=["^KS11", "^KQ11", "코스피", "코스닥"], errors="ignore")
+
+    return df_raw, name_map
+
+
+def _classify_weinstein_stage(weekly_close: pd.Series, ma30: pd.Series) -> tuple[str, str, float]:
+    """
+    주봉 종가와 30주 이동평균선 기반 스탠 와인스타인 4단계 판별
+    반환: (단계 라벨, 배지 색상 hex, 30주선 대비 이격률 %)
+    """
+    valid = pd.DataFrame({"close": weekly_close, "ma30": ma30}).dropna()
+    if len(valid) < 5:
+        return "데이터 부족", "#64748b", 0.0
+
+    curr_price = float(valid["close"].iloc[-1])
+    curr_ma = float(valid["ma30"].iloc[-1])
+    prev_ma_4w = float(valid["ma30"].iloc[-5])
+
+    ma_slope_pct = ((curr_ma - prev_ma_4w) / prev_ma_4w * 100.0) if prev_ma_4w > 0 else 0.0
+    dist_pct = ((curr_price - curr_ma) / curr_ma * 100.0) if curr_ma > 0 else 0.0
+
+    if curr_price >= curr_ma and ma_slope_pct > 0.15:
+        return "2단계 (상승 국면)", "#ef4444", dist_pct
+    elif curr_price < curr_ma and ma_slope_pct < -0.15:
+        return "4단계 (하락 국면)", "#3b82f6", dist_pct
+    elif curr_price >= curr_ma and ma_slope_pct <= 0.15:
+        return "3단계 (천장/횡보)", "#f59e0b", dist_pct
+    else:
+        return "1단계 (바닥/기초)", "#10b981", dist_pct
+
+
+def _prepare_weekly_stage_items(
+    df_daily: pd.DataFrame,
+    tickers: list[str],
+    name_map: dict[str, str],
+) -> list[dict]:
+    """각 ETF별 최근 2년 주봉 종가 및 30주 이동평균선, 섹터, 주식단계 데이터를 계산"""
+    items: list[dict] = []
+    if df_daily.empty:
+        return items
+
+    cutoff_date = df_daily.index.max() - pd.DateOffset(years=2)
+    df_2y = df_daily.loc[df_daily.index >= cutoff_date].copy()
+
+    for ticker in tickers:
+        short_t = ticker.replace(".KS", "").replace(".KQ", "")
+        col = ticker if ticker in df_2y.columns else (short_t if short_t in df_2y.columns else None)
+        if col is None:
+            continue
+
+        s_daily = df_2y[col].dropna()
+        if len(s_daily) < 30:
+            continue
+
+        # 주봉(금요일 기준) 리샘플링 및 30주 이동평균선 계산
+        s_weekly = s_daily.resample("W-FRI").last().dropna()
+        if len(s_weekly) < 10:
+            continue
+
+        ma30 = s_weekly.rolling(window=30, min_periods=10).mean()
+
+        full_name = _clean_etf_name(
+            name_map.get(ticker) or name_map.get(short_t),
+            ticker,
+        )
+        raw_theme = clean_theme_name(full_name)
+        sector = group_theme_category(ticker, full_name, raw_theme)
+        stage_label, stage_color, dist_pct = _classify_weinstein_stage(s_weekly, ma30)
+
+        curr_price = float(s_weekly.iloc[-1])
+        curr_ma30 = float(ma30.dropna().iloc[-1]) if not ma30.dropna().empty else np.nan
+
+        items.append({
+            "ticker": ticker,
+            "code": short_t,
+            "name": full_name,
+            "sector": sector,
+            "sub_theme": raw_theme,
+            "stage": stage_label,
+            "stage_color": stage_color,
+            "curr_price": curr_price,
+            "curr_ma30": curr_ma30,
+            "dist_pct": dist_pct,
+            "weekly_close": s_weekly,
+            "ma30": ma30,
+        })
+
+    return items
+
+
+def _build_plotly_weekly_chart(item: dict) -> go.Figure:
+    """개별 ETF의 2년 주봉 종가 + 30주 이동평균선 Plotly 차트 생성 (X축 날짜 숫자만 표기)"""
+    s_weekly: pd.Series = item["weekly_close"]
+    ma30: pd.Series = item["ma30"]
+
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Scatter(
+            x=s_weekly.index,
+            y=s_weekly.values,
+            mode="lines",
+            name="주봉 종가",
+            line=dict(color="#38bdf8", width=2.2),
+            hovertemplate="날짜: %{x|%Y-%m-%d}<br>주봉 종가: %{y:,.0f}원<extra></extra>",
+        )
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=ma30.index,
+            y=ma30.values,
+            mode="lines",
+            name="30주 이동평균선",
+            line=dict(color="#f97316", width=2.4),
+            hovertemplate="날짜: %{x|%Y-%m-%d}<br>30주선: %{y:,.0f}원<extra></extra>",
+        )
+    )
+
+    ma30_str = f"{item['curr_ma30']:,.0f}" if pd.notna(item["curr_ma30"]) else "-"
+    fig.update_layout(
+        title=dict(
+            text=(
+                f"<b>{item['name']}</b> ({item['code']})<br>"
+                f"<span style='font-size:12px; color:#94a3b8;'>"
+                f"섹터: {item['sector']} | 현재가: {item['curr_price']:,.0f}원 | "
+                f"30주선: {ma30_str}원 ({item['dist_pct']:+.2f}%)"
+                f"</span>"
+            ),
+            font=dict(size=15, color="#f8fafc"),
+            x=0.02,
+            y=0.94,
+        ),
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        height=370,
+        margin=dict(l=45, r=20, t=68, b=42),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.01,
+            xanchor="right",
+            x=1.0,
+            font=dict(size=11, color="#e2e8f0"),
+        ),
+        xaxis=dict(
+            tickformat="%Y-%m-%d",  # 날짜를 숫자로만 표기
+            tickangle=-30,
+            showgrid=True,
+            gridcolor="#1e293b",
+            tickfont=dict(color="#cbd5e1", size=11),
+        ),
+        yaxis=dict(
+            showgrid=True,
+            gridcolor="#1e293b",
+            tickformat=",",
+            tickfont=dict(color="#cbd5e1", size=11),
+        ),
+    )
+    return fig
+
+
+def _configure_korean_matplotlib_font() -> None:
+    """PDF 생성 시 한글 깨짐 방지를 위한 폰트 설정"""
+    candidate_fonts = [
+        "Malgun Gothic",
+        "AppleGothic",
+        "NanumGothic",
+        "Noto Sans CJK KR",
+        "DejaVu Sans",
+    ]
+    available = {f.name for f in fm.fontManager.ttflist}
+    for font_name in candidate_fonts:
+        if font_name in available:
+            plt.rcParams["font.family"] = font_name
+            break
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _generate_pdf_bytes(items_serializable: list[dict], run_date_str: str) -> bytes:
+    """
+    한 페이지당 ETF 2개(좌·우 1행 2열)씩 30주 이동평균선 차트와 단계 정보를 배치한 PDF 생성
+    """
+    _configure_korean_matplotlib_font()
+    buf = BytesIO()
+
+    with PdfPages(buf) as pdf:
+        # 1페이지당 2행 x 2열 = 4개(또는 한 행에 2개씩 배치) 구성 -> 가독성을 위해 페이지당 2행x2열(4개) 배치
+        per_page = 4
+        total_pages = max(1, (len(items_serializable) + per_page - 1) // per_page)
+
+        for page_idx in range(total_pages):
+            batch = items_serializable[page_idx * per_page : (page_idx + 1) * per_page]
+            fig, axes = plt.subplots(2, 2, figsize=(11.69, 8.27))  # A4 가로
+            fig.patch.set_facecolor("#ffffff")
+            axes_flat = axes.flatten()
+
+            fig.suptitle(
+                f"섹터별 주식단계 리포트 (최근 2년 주봉 & 30주 이동평균선)  |  기준일: {run_date_str}  ({page_idx + 1}/{total_pages})",
+                fontsize=13,
+                fontweight="bold",
+                y=0.97,
+            )
+
+            for idx, ax in enumerate(axes_flat):
+                if idx >= len(batch):
+                    ax.axis("off")
+                    continue
+
+                item = batch[idx]
+                dates = pd.to_datetime(item["dates"])
+                closes = np.array(item["closes"], dtype=float)
+                ma30 = np.array(item["ma30"], dtype=float)
+
+                ax.plot(dates, closes, color="#0284c7", linewidth=1.4, label="주봉 종가")
+                ax.plot(dates, ma30, color="#ea580c", linewidth=1.6, label="30주 이동평균선")
+
+                ma30_str = f"{item['curr_ma30']:,.0f}" if pd.notna(item["curr_ma30"]) else "-"
+                ax.set_title(
+                    f"[{item['sector']}] {item['name']} ({item['code']})\n"
+                    f"{item['stage']} | 현재가: {item['curr_price']:,.0f}원 | 30주선: {ma30_str}원 ({item['dist_pct']:+.2f}%)",
+                    fontsize=9.5,
+                    fontweight="bold",
+                    pad=8,
+                )
+
+                # X축 날짜를 숫자로만 표기 (YYYY-MM-DD)
+                ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+                ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
+                ax.tick_params(axis="x", labelsize=8, rotation=25)
+                ax.tick_params(axis="y", labelsize=8)
+                ax.grid(True, linestyle="--", alpha=0.35)
+                ax.legend(loc="upper left", fontsize=7.5, frameon=True)
+
+            plt.tight_layout(rect=[0.01, 0.01, 0.99, 0.93])
+            pdf.savefig(fig, dpi=150)
+            plt.close(fig)
+
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def render():
+    now = datetime.now(KST)
+    run_date_str = now.strftime("%Y-%m-%d")
+    file_date_str = now.strftime("%Y%m%d")
+    run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
+
+    # 상단 헤더 및 새로고침 버튼
+    col_head, col_refresh = st.columns([8, 2])
+    with col_head:
+        st.markdown(f"## 📊 섹터별 주식단계 분석 (30주 이동평균선 기준)")
+        st.caption(f"최근 2년 주봉 종가 및 30주 이동평균선(30W SMA) 분석 | 조회 시각: {run_timestamp}")
+    with col_refresh:
+        if st.button("🔄 데이터 새로고침", key="refresh_sector_price_stage"):
+            st.cache_data.clear()
+            st.rerun()
+
+    normalized_tickers, pre_names = _normalize_tickers_and_names(etf_tickers, {})
+
+    with st.spinner("최근 2년치 ETF 주가 데이터를 불러와 30주 이동평균선을 계산하는 중입니다..."):
+        df_daily, mapped_names = _load_2y_etf_prices(normalized_tickers)
+        _, merged_names = _normalize_tickers_and_names(etf_tickers, {**pre_names, **mapped_names})
+        all_items = _prepare_weekly_stage_items(df_daily, normalized_tickers, merged_names)
+
+    if not all_items:
+        st.warning("표시할 ETF 주가 데이터가 없습니다. 네트워크 상태 또는 종목 구성을 확인해 주세요.")
+        return
+
+    # 필터 컨트롤 (섹터 선택 / 단계 선택 / PDF 다운로드)
+    sectors = ["전체"] + sorted(list({item["sector"] for item in all_items}))
+    stages = [
+        "전체",
+        "2단계 (상승 국면)",
+        "1단계 (바닥/기초)",
+        "3단계 (천장/횡보)",
+        "4단계 (하락 국면)",
+    ]
+
+    col_f1, col_f2, col_pdf = st.columns([3, 3, 4])
+    with col_f1:
+        selected_sector = st.selectbox("대분류 섹터 필터", sectors, index=0, key="stage_sector_filter")
+    with col_f2:
+        selected_stage = st.selectbox("주식 단계 필터", stages, index=0, key="stage_phase_filter")
+
+    filtered_items = [
+        item
+        for item in all_items
+        if (selected_sector == "전체" or item["sector"] == selected_sector)
+        and (selected_stage == "전체" or item["stage"] == selected_stage)
+    ]
+
+    # PDF 생성용 직렬화 데이터 준비
+    serializable_for_pdf = [
+        {
+            "ticker": it["ticker"],
+            "code": it["code"],
+            "name": it["name"],
+            "sector": it["sector"],
+            "stage": it["stage"],
+            "curr_price": it["curr_price"],
+            "curr_ma30": it["curr_ma30"],
+            "dist_pct": it["dist_pct"],
+            "dates": [d.strftime("%Y-%m-%d") for d in it["weekly_close"].index],
+            "closes": it["weekly_close"].tolist(),
+            "ma30": it["ma30"].tolist(),
+        }
+        for it in filtered_items
+    ]
+
+    pdf_filename = f"섹터별_주식단계_{file_date_str}.pdf"
+    with col_pdf:
+        st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+        if serializable_for_pdf:
+            pdf_bytes = _generate_pdf_bytes(serializable_for_pdf, run_date_str)
+            st.download_button(
+                label=f"📥 PDF 다운로드 ({pdf_filename})",
+                data=pdf_bytes,
+                file_name=pdf_filename,
+                mime="application/pdf",
+                use_container_width=True,
+                key="download_sector_stage_pdf",
+            )
+
+    if not filtered_items:
+        st.info("선택한 필터 조건에 해당하는 ETF가 없습니다.")
+        return
+
+    # 요약 테이블 (접이식)
+    with st.expander(f"📋 섹터별 주식단계 요약표 보기 (총 {len(filtered_items)}개 ETF)", expanded=False):
+        summary_df = pd.DataFrame([
+            {
+                "대분류 섹터": it["sector"],
+                "ETF명": it["name"],
+                "종목코드": it["code"],
+                "주식 단계": it["stage"],
+                "현재가(원)": f"{it['curr_price']:,.0f}",
+                "30주 이동평균(원)": f"{it['curr_ma30']:,.0f}" if pd.notna(it["curr_ma30"]) else "-",
+                "30주선 대비(%)": f"{it['dist_pct']:+.2f}%",
+            }
+            for it in filtered_items
+        ])
+        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # 한 화면(한 행)에 ETF 2개씩 나란히 배치
+    for i in range(0, len(filtered_items), 2):
+        cols = st.columns(2)
+        for col_idx in range(2):
+            item_idx = i + col_idx
+            if item_idx >= len(filtered_items):
+                break
+
+            item = filtered_items[item_idx]
+            with cols[col_idx]:
+                st.markdown(
+                    f"""
+                    <div style="background-color:#1e293b; border-left:5px solid {item['stage_color']};
+                                padding:8px 14px; border-radius:8px; margin-bottom:6px;
+                                display:flex; justify-content:space-between; align-items:center;">
+                        <span style="color:#f8fafc; font-weight:700; font-size:14px;">
+                            [{item['sector']}] {item['name']}
+                        </span>
+                        <span style="background-color:{item['stage_color']}; color:#ffffff;
+                                     padding:2px 10px; border-radius:12px; font-size:12px; font-weight:700;">
+                            {item['stage']}
+                        </span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                fig = _build_plotly_weekly_chart(item)
+                st.plotly_chart(fig, use_container_width=True, key=f"chart_{item['code']}_{item_idx}")
