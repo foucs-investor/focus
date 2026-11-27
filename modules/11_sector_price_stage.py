@@ -1,12 +1,15 @@
 # modules/11_sector_price_stage.py
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
+import subprocess
+import sys
 from zoneinfo import ZoneInfo
 
 import matplotlib.dates as mdates
 import matplotlib.font_manager as fm
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,6 +20,15 @@ from utils import clean_theme_name, download_etf_data, etf_tickers
 # 사이드바 라디오 버튼에 표시될 메뉴명
 MENU_NAME = "섹터별 주식단계"
 KST = ZoneInfo("Asia/Seoul")
+
+# 주식 단계 오름차순 정렬 우선순위
+STAGE_SORT_ORDER: dict[str, int] = {
+    "1단계 (바닥/기초)": 1,
+    "2단계 (상승 국면)": 2,
+    "3단계 (천장/횡보)": 3,
+    "4단계 (하락 국면)": 4,
+    "데이터 부족": 99,
+}
 
 
 def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
@@ -203,14 +215,14 @@ def _load_2y_etf_prices(tickers: list[str]) -> tuple[pd.DataFrame, dict[str, str
     return df_raw, name_map
 
 
-def _classify_weinstein_stage(weekly_close: pd.Series, ma30: pd.Series) -> tuple[str, str, float]:
+def _classify_weinstein_stage(weekly_close: pd.Series, ma30: pd.Series) -> tuple[str, int, str, float]:
     """
     주봉 종가와 30주 이동평균선 기반 스탠 와인스타인 4단계 판별
-    반환: (단계 라벨, 배지 색상 hex, 30주선 대비 이격률 %)
+    반환: (단계 라벨, 정렬 순서, 배지 색상 hex, 30주선 대비 이격률 %)
     """
     valid = pd.DataFrame({"close": weekly_close, "ma30": ma30}).dropna()
     if len(valid) < 5:
-        return "데이터 부족", "#64748b", 0.0
+        return "데이터 부족", STAGE_SORT_ORDER["데이터 부족"], "#64748b", 0.0
 
     curr_price = float(valid["close"].iloc[-1])
     curr_ma = float(valid["ma30"].iloc[-1])
@@ -220,13 +232,17 @@ def _classify_weinstein_stage(weekly_close: pd.Series, ma30: pd.Series) -> tuple
     dist_pct = ((curr_price - curr_ma) / curr_ma * 100.0) if curr_ma > 0 else 0.0
 
     if curr_price >= curr_ma and ma_slope_pct > 0.15:
-        return "2단계 (상승 국면)", "#ef4444", dist_pct
+        label = "2단계 (상승 국면)"
+        return label, STAGE_SORT_ORDER[label], "#ef4444", dist_pct
     elif curr_price < curr_ma and ma_slope_pct < -0.15:
-        return "4단계 (하락 국면)", "#3b82f6", dist_pct
+        label = "4단계 (하락 국면)"
+        return label, STAGE_SORT_ORDER[label], "#3b82f6", dist_pct
     elif curr_price >= curr_ma and ma_slope_pct <= 0.15:
-        return "3단계 (천장/횡보)", "#f59e0b", dist_pct
+        label = "3단계 (천장/횡보)"
+        return label, STAGE_SORT_ORDER[label], "#f59e0b", dist_pct
     else:
-        return "1단계 (바닥/기초)", "#10b981", dist_pct
+        label = "1단계 (바닥/기초)"
+        return label, STAGE_SORT_ORDER[label], "#10b981", dist_pct
 
 
 def _prepare_weekly_stage_items(
@@ -234,7 +250,7 @@ def _prepare_weekly_stage_items(
     tickers: list[str],
     name_map: dict[str, str],
 ) -> list[dict]:
-    """각 ETF별 최근 2년 주봉 종가 및 30주 이동평균선, 섹터, 주식단계 데이터를 계산"""
+    """각 ETF별 최근 2년 주봉 종가 및 30주 이동평균선, 섹터, 주식단계 데이터를 계산 후 단계 오름차순 정렬"""
     items: list[dict] = []
     if df_daily.empty:
         return items
@@ -252,7 +268,6 @@ def _prepare_weekly_stage_items(
         if len(s_daily) < 30:
             continue
 
-        # 주봉(금요일 기준) 리샘플링 및 30주 이동평균선 계산
         s_weekly = s_daily.resample("W-FRI").last().dropna()
         if len(s_weekly) < 10:
             continue
@@ -265,7 +280,7 @@ def _prepare_weekly_stage_items(
         )
         raw_theme = clean_theme_name(full_name)
         sector = group_theme_category(ticker, full_name, raw_theme)
-        stage_label, stage_color, dist_pct = _classify_weinstein_stage(s_weekly, ma30)
+        stage_label, stage_order, stage_color, dist_pct = _classify_weinstein_stage(s_weekly, ma30)
 
         curr_price = float(s_weekly.iloc[-1])
         curr_ma30 = float(ma30.dropna().iloc[-1]) if not ma30.dropna().empty else np.nan
@@ -277,6 +292,7 @@ def _prepare_weekly_stage_items(
             "sector": sector,
             "sub_theme": raw_theme,
             "stage": stage_label,
+            "stage_order": stage_order,
             "stage_color": stage_color,
             "curr_price": curr_price,
             "curr_ma30": curr_ma30,
@@ -285,6 +301,8 @@ def _prepare_weekly_stage_items(
             "ma30": ma30,
         })
 
+    # 주식 단계 오름차순(1단계 -> 2단계 -> 3단계 -> 4단계), 동일 단계 내 이격률 내림차순 정렬
+    items.sort(key=lambda x: (x["stage_order"], -x["dist_pct"], x["name"]))
     return items
 
 
@@ -344,7 +362,7 @@ def _build_plotly_weekly_chart(item: dict) -> go.Figure:
             font=dict(size=11, color="#e2e8f0"),
         ),
         xaxis=dict(
-            tickformat="%Y-%m-%d",  # 날짜를 숫자로만 표기
+            tickformat="%Y-%m-%d",
             tickangle=-30,
             showgrid=True,
             gridcolor="#1e293b",
@@ -360,50 +378,103 @@ def _build_plotly_weekly_chart(item: dict) -> go.Figure:
     return fig
 
 
-def _configure_korean_matplotlib_font() -> None:
-    """PDF 생성 시 한글 깨짐 방지를 위한 폰트 설정"""
-    candidate_fonts = [
-        "Malgun Gothic",
-        "AppleGothic",
-        "NanumGothic",
-        "Noto Sans CJK KR",
-        "DejaVu Sans",
+def _find_or_install_korean_font_path() -> str | None:
+    """
+    PDF 생성 시 한글이 깨지지 않도록 TTF/OTF 한글 폰트 경로를 탐색하거나 설치
+    """
+    # 1. 프로젝트 내 번들 폰트 우선 확인
+    here = Path(__file__).resolve()
+    candidate_paths = [
+        here.parent / "fonts" / "NanumGothic.ttf",
+        here.parent.parent / "fonts" / "NanumGothic.ttf",
+        here.parent / "NanumGothic.ttf",
+        here.parent.parent / "NanumGothic.ttf",
+        here.parent / "fonts" / "NotoSansKR-Regular.ttf",
+        here.parent.parent / "fonts" / "NotoSansKR-Regular.ttf",
+        Path("C:/Windows/Fonts/malgun.ttf"),
+        Path("C:/Windows/Fonts/NanumGothic.ttf"),
+        Path("/System/Library/Fonts/AppleSDGothicNeo.ttc"),
+        Path("/usr/share/fonts/truetype/nanum/NanumGothic.ttf"),
+        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
     ]
-    available = {f.name for f in fm.fontManager.ttflist}
-    for font_name in candidate_fonts:
-        if font_name in available:
-            plt.rcParams["font.family"] = font_name
-            break
-    plt.rcParams["axes.unicode_minus"] = False
+
+    for p in candidate_paths:
+        if p.exists():
+            return str(p)
+
+    # 2. matplotlib 폰트 매니저에서 한글 지원 폰트 검색
+    kr_keywords = ("nanum", "malgun", "noto sans cjk", "applegothic", "applesdgothic", "unbatang", "baekmuk")
+    for f in fm.fontManager.ttflist:
+        low_name = (f.name or "").lower()
+        if any(k in low_name for k in kr_keywords) and Path(f.fname).exists():
+            return f.fname
+
+    # 3. Linux/Streamlit Cloud 환경에서 나눔폰트 패키지 설치 시도
+    if sys.platform.startswith("linux"):
+        try:
+            subprocess.run(
+                ["apt-get", "update", "-qq"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+            )
+            subprocess.run(
+                ["apt-get", "install", "-y", "-qq", "fonts-nanum"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=40,
+            )
+            for p in fm.findSystemFonts(fontpaths=["/usr/share/fonts"], fontext="ttf"):
+                if "nanum" in Path(p).name.lower():
+                    return p
+        except Exception:
+            pass
+
+    return None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _generate_pdf_bytes(items_serializable: list[dict], run_date_str: str) -> bytes:
     """
-    한 페이지당 ETF 2개(좌·우 1행 2열)씩 30주 이동평균선 차트와 단계 정보를 배치한 PDF 생성
+    주식 단계 오름차순으로 정렬된 ETF들의 30주 이동평균선 차트를
+    한 페이지당 2개(좌·우 1행 2열)씩 배치한 PDF 생성 (한글 폰트 내장)
     """
-    _configure_korean_matplotlib_font()
+    font_path = _find_or_install_korean_font_path()
+    kr_prop = fm.FontProperties(fname=font_path) if font_path else None
+
+    if font_path:
+        try:
+            fm.fontManager.addfont(font_path)
+            registered_name = fm.FontProperties(fname=font_path).get_name()
+            plt.rcParams["font.family"] = registered_name
+        except Exception:
+            pass
+
+    plt.rcParams["axes.unicode_minus"] = False
     buf = BytesIO()
 
     with PdfPages(buf) as pdf:
-        # 1페이지당 2행 x 2열 = 4개(또는 한 행에 2개씩 배치) 구성 -> 가독성을 위해 페이지당 2행x2열(4개) 배치
-        per_page = 4
+        # 한 페이지당 ETF 2개(1행 2열) 배치
+        per_page = 2
         total_pages = max(1, (len(items_serializable) + per_page - 1) // per_page)
 
         for page_idx in range(total_pages):
             batch = items_serializable[page_idx * per_page : (page_idx + 1) * per_page]
-            fig, axes = plt.subplots(2, 2, figsize=(11.69, 8.27))  # A4 가로
+            fig, axes = plt.subplots(1, 2, figsize=(11.69, 6.2))  # A4 가로, 한 행에 2개 배치
             fig.patch.set_facecolor("#ffffff")
-            axes_flat = axes.flatten()
 
-            fig.suptitle(
-                f"섹터별 주식단계 리포트 (최근 2년 주봉 & 30주 이동평균선)  |  기준일: {run_date_str}  ({page_idx + 1}/{total_pages})",
-                fontsize=13,
-                fontweight="bold",
-                y=0.97,
+            title_text = (
+                f"섹터별 주식단계 리포트 (단계 오름차순 · 최근 2년 주봉 & 30주 이평선)  |  "
+                f"기준일: {run_date_str}  ({page_idx + 1}/{total_pages})"
             )
+            if kr_prop:
+                fig.suptitle(title_text, fontsize=12, fontweight="bold", y=0.97, fontproperties=kr_prop)
+            else:
+                fig.suptitle(title_text, fontsize=12, fontweight="bold", y=0.97)
 
-            for idx, ax in enumerate(axes_flat):
+            for idx, ax in enumerate(axes):
                 if idx >= len(batch):
                     ax.axis("off")
                     continue
@@ -413,17 +484,19 @@ def _generate_pdf_bytes(items_serializable: list[dict], run_date_str: str) -> by
                 closes = np.array(item["closes"], dtype=float)
                 ma30 = np.array(item["ma30"], dtype=float)
 
-                ax.plot(dates, closes, color="#0284c7", linewidth=1.4, label="주봉 종가")
-                ax.plot(dates, ma30, color="#ea580c", linewidth=1.6, label="30주 이동평균선")
+                ax.plot(dates, closes, color="#0284c7", linewidth=1.6, label="주봉 종가")
+                ax.plot(dates, ma30, color="#ea580c", linewidth=1.8, label="30주 이동평균선")
 
                 ma30_str = f"{item['curr_ma30']:,.0f}" if pd.notna(item["curr_ma30"]) else "-"
-                ax.set_title(
-                    f"[{item['sector']}] {item['name']} ({item['code']})\n"
-                    f"{item['stage']} | 현재가: {item['curr_price']:,.0f}원 | 30주선: {ma30_str}원 ({item['dist_pct']:+.2f}%)",
-                    fontsize=9.5,
-                    fontweight="bold",
-                    pad=8,
+                sub_title = (
+                    f"[{item['stage']}] {item['name']} ({item['code']})\n"
+                    f"섹터: {item['sector']} | 현재가: {item['curr_price']:,.0f}원 | "
+                    f"30주선: {ma30_str}원 ({item['dist_pct']:+.2f}%)"
                 )
+                if kr_prop:
+                    ax.set_title(sub_title, fontsize=9.5, fontweight="bold", pad=8, fontproperties=kr_prop)
+                else:
+                    ax.set_title(sub_title, fontsize=9.5, fontweight="bold", pad=8)
 
                 # X축 날짜를 숫자로만 표기 (YYYY-MM-DD)
                 ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
@@ -431,9 +504,13 @@ def _generate_pdf_bytes(items_serializable: list[dict], run_date_str: str) -> by
                 ax.tick_params(axis="x", labelsize=8, rotation=25)
                 ax.tick_params(axis="y", labelsize=8)
                 ax.grid(True, linestyle="--", alpha=0.35)
-                ax.legend(loc="upper left", fontsize=7.5, frameon=True)
 
-            plt.tight_layout(rect=[0.01, 0.01, 0.99, 0.93])
+                leg = ax.legend(loc="upper left", fontsize=8, frameon=True)
+                if kr_prop and leg:
+                    for txt in leg.get_texts():
+                        txt.set_fontproperties(kr_prop)
+
+            plt.tight_layout(rect=[0.01, 0.02, 0.99, 0.90])
             pdf.savefig(fig, dpi=150)
             plt.close(fig)
 
@@ -447,11 +524,12 @@ def render():
     file_date_str = now.strftime("%Y%m%d")
     run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
 
-    # 상단 헤더 및 새로고침 버튼
     col_head, col_refresh = st.columns([8, 2])
     with col_head:
-        st.markdown(f"## 📊 섹터별 주식단계 분석 (30주 이동평균선 기준)")
-        st.caption(f"최근 2년 주봉 종가 및 30주 이동평균선(30W SMA) 분석 | 조회 시각: {run_timestamp}")
+        st.markdown("## 📊 섹터별 주식단계 분석 (30주 이동평균선 기준)")
+        st.caption(
+            f"주식 단계 오름차순(1단계 → 4단계) 정렬 | 최근 2년 주봉 & 30주 이동평균선 | 조회 시각: {run_timestamp}"
+        )
     with col_refresh:
         if st.button("🔄 데이터 새로고침", key="refresh_sector_price_stage"):
             st.cache_data.clear()
@@ -468,12 +546,11 @@ def render():
         st.warning("표시할 ETF 주가 데이터가 없습니다. 네트워크 상태 또는 종목 구성을 확인해 주세요.")
         return
 
-    # 필터 컨트롤 (섹터 선택 / 단계 선택 / PDF 다운로드)
     sectors = ["전체"] + sorted(list({item["sector"] for item in all_items}))
     stages = [
         "전체",
-        "2단계 (상승 국면)",
         "1단계 (바닥/기초)",
+        "2단계 (상승 국면)",
         "3단계 (천장/횡보)",
         "4단계 (하락 국면)",
     ]
@@ -490,8 +567,8 @@ def render():
         if (selected_sector == "전체" or item["sector"] == selected_sector)
         and (selected_stage == "전체" or item["stage"] == selected_stage)
     ]
+    filtered_items.sort(key=lambda x: (x["stage_order"], -x["dist_pct"], x["name"]))
 
-    # PDF 생성용 직렬화 데이터 준비
     serializable_for_pdf = [
         {
             "ticker": it["ticker"],
@@ -499,6 +576,7 @@ def render():
             "name": it["name"],
             "sector": it["sector"],
             "stage": it["stage"],
+            "stage_order": it["stage_order"],
             "curr_price": it["curr_price"],
             "curr_ma30": it["curr_ma30"],
             "dist_pct": it["dist_pct"],
@@ -527,14 +605,13 @@ def render():
         st.info("선택한 필터 조건에 해당하는 ETF가 없습니다.")
         return
 
-    # 요약 테이블 (접이식)
-    with st.expander(f"📋 섹터별 주식단계 요약표 보기 (총 {len(filtered_items)}개 ETF)", expanded=False):
+    with st.expander(f"📋 섹터별 주식단계 요약표 보기 (총 {len(filtered_items)}개 ETF · 단계 오름차순)", expanded=False):
         summary_df = pd.DataFrame([
             {
+                "주식 단계": it["stage"],
                 "대분류 섹터": it["sector"],
                 "ETF명": it["name"],
                 "종목코드": it["code"],
-                "주식 단계": it["stage"],
                 "현재가(원)": f"{it['curr_price']:,.0f}",
                 "30주 이동평균(원)": f"{it['curr_ma30']:,.0f}" if pd.notna(it["curr_ma30"]) else "-",
                 "30주선 대비(%)": f"{it['dist_pct']:+.2f}%",
@@ -545,7 +622,7 @@ def render():
 
     st.markdown("---")
 
-    # 한 화면(한 행)에 ETF 2개씩 나란히 배치
+    # 한 화면(한 행)에 ETF 2개씩 나란히 배치 (주식 단계 오름차순)
     for i in range(0, len(filtered_items), 2):
         cols = st.columns(2)
         for col_idx in range(2):
