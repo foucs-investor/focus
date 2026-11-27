@@ -30,6 +30,81 @@ STAGE_SORT_ORDER: dict[str, int] = {
     "데이터 부족": 99,
 }
 
+# ETF명 Hover 시 주요 구성 종목 말풍선 표시용 매핑
+ETF_TOP_HOLDINGS: dict[str, list[str]] = {
+    "KODEX 반도체": ["SK하이닉스", "삼성전자", "한미반도체", "주성엔지니어링", "심텍"],
+    "KODEX AI반도체TOP2플러스": ["SK하이닉스", "삼성전자", "SK스퀘어", "삼성전기", "한미반도체"],
+    "KODEX AI반도체핵심장비": ["한미반도체", "원익IPS", "주성엔지니어링", "이오테크닉스", "HPSP"],
+    "SOL AI반도체소부장": ["이수페타시스", "한미반도체", "주성엔지니어링", "대덕전자", "심텍"],
+    "TIGER 200 IT": ["SK스퀘어", "SK하이닉스", "삼성전자", "삼성전기", "삼성SDI"],
+    "SOL 반도체전공정": ["주성엔지니어링", "HPSP", "원익IPS", "한솔케미칼", "피에스케이"],
+    "SOL 반도체후공정": ["이수페타시스", "한미반도체", "이오테크닉스", "리노공업", "대덕전자"],
+    "KODEX AI전력핵심설비": ["LS ELECTRIC", "효성중공업", "HD현대일렉트릭", "LS", "대한전선"],
+    "ACE 원자력테마딥서치": ["현대건설", "두산에너빌리티", "비에이치아이", "우리기술", "대우건설"],
+    "HANARO FN친환경에너지": ["삼성SDI", "LG에너지솔루션", "POSCO홀딩스", "포스코인터내셔널", "OCI홀딩스"],
+    "PLUS 태양광&ESS": ["한화솔루션", "OCI홀딩스", "삼성SDI", "LG에너지솔루션", "HD현대에너지솔루션"],
+    "KODEX 은행": ["하나금융지주", "우리금융지주", "KB금융", "신한지주", "카카오뱅크"],
+    "KODEX 보험": ["DB손해보험", "삼성화재", "삼성생명", "현대해상", "코리안리"],
+    "KODEX 증권": ["삼성증권", "한국금융지주", "NH투자증권", "키움증권", "미래에셋증권"],
+    "TIGER 지주회사": ["한진칼", "LG", "SK", "POSCO홀딩스", "삼성물산"],
+    "TIGER 코스피고배당": ["한일시멘트", "아이마켓코리아", "제일기획", "에스원", "DB손해보험"],
+    "TIGER 우선주": ["삼성전자우", "현대차2우B", "삼성화재우", "LG전자우", "미래에셋증권2우B"],
+    "KODEX 코리아밸류업": ["SK하이닉스", "삼성전자", "SK스퀘어", "KB금융", "현대차"],
+    "KODEX 바이오": ["프로티나", "루닛", "동국제약", "리브스메드", "셀트리온"],
+    "TIGER 바이오 TOP 10": ["셀트리온", "삼성바이오로직스", "알테오젠", "유한양행", "SK바이오팜"],
+    "HANARO 바이오코리아액티브": ["한올바이오파마", "셀트리온", "한미약품", "에이비엘바이오", "유한양행"],
+    "TIGER 의료기기": ["파마리서치", "루닛", "엘앤씨바이오", "씨젠", "리브스메드"],
+    "KIWOOM 의료AI": ["셀트리온", "SK바이오팜", "루닛", "프로티나", "차바이오텍"],
+    "KODEX 로봇액티브": ["로보티즈", "레인보우로보틱스", "삼성전자", "현대모비스", "LG전자"],
+    "TIGER 소프트웨어": ["NAVER", "카카오", "삼성SDS", "크래프톤", "LG씨엔에스"],
+    "TIGER SOFTWARE": ["NAVER", "카카오", "삼성SDS", "크래프톤", "LG씨엔에스"],
+    "TIGER 인터넷TOP10": ["카카오", "서진시스템", "NAVER", "대한광통신", "안랩"],
+    "RISE 플랫폼테마": ["NHN", "NICE정보통신", "카카오", "SOOP", "NAVER"],
+    "TIGER 미디어컨텐츠": ["스튜디오드래곤", "CJ ENM", "에스엠", "JYP Ent.", "디어유"],
+    "RISE 네트워크인프라": ["삼성전자", "SK하이닉스", "삼성전기", "LG이노텍", "이수페타시스"],
+    "RISE 5G테크": ["에이스테크", "오이솔루션", "서진시스템", "이노와이어리스", "RFHIC"],
+    "TIGER 200 헬스케어": ["셀트리온", "삼성바이오로직스", "유한양행", "SK바이오팜", "한미약품"],
+    "TIGER 조선TOP10": ["HD한국조선해양", "HD현대중공업", "한화오션", "삼성중공업", "HD현대마린솔루션"],
+    "PLUS K방산": ["한화에어로스페이스", "한국항공우주", "한화오션", "LIG넥스원", "현대로템"],
+    "KODEX 자동차": ["기아", "현대모비스", "한국타이어앤테크놀로지", "현대차", "HL만도"],
+    "TIGER 200 중공업": ["두산에너빌리티", "HD한국조선해양", "삼성중공업", "HD현대일렉트릭", "HD현대중공업"],
+    "HANARO CAPEX설비투자iSelect": ["두산밥캣", "HD건설기계", "LS ELECTRIC", "효성중공업", "두산에너빌리티"],
+    "KODEX 건설": ["삼성E&A", "현대건설", "대우건설", "GS건설", "DL이앤씨"],
+    "KODEX 철강": ["POSCO홀딩스", "현대제철", "고려아연", "풍산", "에이치브이엠"],
+    "KODEX 에너지화학": ["LG화학", "SK이노베이션", "HD현대", "S-Oil", "한화솔루션"],
+    "TIGER 2차전지테마": ["LG에너지솔루션", "POSCO홀딩스", "삼성SDI", "SK이노베이션", "LG화학"],
+    "TIGER 2차전지소재Fn": ["포스코퓨처엠", "에코프로", "POSCO홀딩스", "에코프로비엠", "LG화학"],
+    "TIGER 화장품": ["아모레퍼시픽", "코스맥스", "LG생활건강", "파마리서치", "한국콜마"],
+    "HANARO K-뷰티": ["아모레퍼시픽", "에이피알", "코스맥스", "LG생활건강", "한국콜마"],
+    "TIGER 중국소비테마": ["코스맥스", "파라다이스", "삼양식품", "덴티움", "아모레퍼시픽"],
+    "TIGER 여행레저": ["파라다이스", "아시아나항공", "강원랜드", "대한항공", "호텔신라", "롯데관광개발"],
+    "ACE KPOP포커스": ["하이브", "에스엠", "JYP Ent.", "와이지엔터테인먼트", "CJ ENM"],
+    "KODEX K-콘텐츠": ["카카오", "NAVER", "크래프톤", "하이브", "엔씨소프트"],
+    "KODEX 미디어&엔터테인먼트": ["하이브", "CJ ENM", "에스엠", "JYP Ent.", "스튜디오드래곤"],
+    "KODEX 게임산업": ["크래프톤", "엔씨소프트", "펄어비스", "넷마블", "시프트업"],
+    "TIGER 게임TOP10": ["크래프톤", "엔씨소프트", "펄어비스", "넷마블", "NHN"],
+    "TIGER 경기방어": ["셀트리온", "KT&G", "KT", "삼성바이오로직스", "SK텔레콤"],
+    "TIGER 200 생활소비재": ["KT&G", "한국전력", "에이피알", "삼양식품", "아모레퍼시픽"],
+    "KODEX 경기소비재": ["한진칼", "코웨이", "LG전자", "신세계", "강원랜드"],
+    "HANARO Fn K-푸드": ["삼양식품", "CJ제일제당", "농심", "오리온", "오뚜기"],
+    "MIDAS 중소형액티브": ["삼성전기", "두산", "테스", "효성중공업", "엘앤씨바이오"],
+    "ACE K휴머노이드로봇산업TOP2+": ["로보티즈", "현대차", "레인보우로보틱스", "에스피지", "현대모비스"],
+    "KoAct 광통신&위성네트워크액티브": ["RF머트리얼즈", "우리로", "대한광통신", "RFHIC", "케이엠더블유"],
+    "TIGER 글로벌AI사이버보안": ["Cloudflare", "Okta", "Zscaler", "Palo Alto Networks", "Fortinet"],
+}
+
+
+def _get_top_holdings_text(etf_name: str) -> str:
+    """ETF명에 대응하는 주요 구성 종목 문자열 반환"""
+    if not etf_name:
+        return "구성 종목 정보 없음"
+    if etf_name in ETF_TOP_HOLDINGS:
+        return ", ".join(ETF_TOP_HOLDINGS[etf_name])
+    for key, holdings in ETF_TOP_HOLDINGS.items():
+        if key in etf_name or etf_name in key:
+            return ", ".join(holdings)
+    return "구성 종목 정보 준비 중"
+
 
 def group_theme_category(ticker: str, full_name: str, theme_name: str) -> str:
     """티커, 전체 종목명, 세부 테마명을 기반으로 상위 대분류 테마로 묶어주는 함수"""
@@ -299,9 +374,9 @@ def _prepare_weekly_stage_items(
             "dist_pct": dist_pct,
             "weekly_close": s_weekly,
             "ma30": ma30,
+            "holdings": _get_top_holdings_text(full_name),
         })
 
-    # 주식 단계 오름차순(1단계 -> 2단계 -> 3단계 -> 4단계), 동일 단계 내 이격률 내림차순 정렬
     items.sort(key=lambda x: (x["stage_order"], -x["dist_pct"], x["name"]))
     return items
 
@@ -378,11 +453,120 @@ def _build_plotly_weekly_chart(item: dict) -> go.Figure:
     return fig
 
 
+def _render_etf_title_with_bubble(item: dict) -> None:
+    """ETF 제목에 마우스를 올리면 소속 주요 기업들이 말풍선으로 표시되는 헤더 렌더링"""
+    safe_name = (
+        item["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_sector = (
+        item["sector"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_stage = (
+        item["stage"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    safe_holdings = (
+        item["holdings"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    stage_color = item["stage_color"]
+
+    html = f"""
+    <style>
+      .etf-stage-header-wrap {{
+        position: relative;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background-color: #1e293b;
+        border-left: 5px solid {stage_color};
+        padding: 9px 14px;
+        border-radius: 8px;
+        margin-bottom: 6px;
+        cursor: help;
+      }}
+      .etf-stage-title-text {{
+        color: #f8fafc;
+        font-weight: 700;
+        font-size: 14px;
+        border-bottom: 1px dotted #94a3b8;
+        padding-bottom: 1px;
+      }}
+      .etf-stage-header-wrap:hover .etf-stage-title-text {{
+        color: #fbbf24;
+        border-bottom-color: #fbbf24;
+      }}
+      .etf-stage-bubble {{
+        display: none;
+        position: fixed;
+        top: auto;
+        left: auto;
+        background-color: #020617;
+        color: #f8fafc;
+        border: 1px solid #38bdf8;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 12.5px;
+        line-height: 1.5;
+        max-width: 360px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.7);
+        z-index: 99999;
+        pointer-events: none;
+      }}
+      .etf-stage-popup-card {{
+        display: none;
+        position: absolute;
+        top: 108%;
+        left: 12px;
+        background-color: #020617;
+        color: #f8fafc;
+        border: 1px solid #38bdf8;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-size: 12.5px;
+        line-height: 1.5;
+        width: max-content;
+        max-width: 360px;
+        white-space: normal;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.75);
+        z-index: 9999;
+        pointer-events: none;
+      }}
+      .etf-stage-popup-card::before {{
+        content: "";
+        position: absolute;
+        bottom: 100%;
+        left: 24px;
+        border-width: 6px;
+        border-style: solid;
+        border-color: transparent transparent #38bdf8 transparent;
+      }}
+      .etf-stage-header-wrap:hover .etf-stage-popup-card {{
+        display: block;
+      }}
+      .etf-stage-badge {{
+        background-color: {stage_color};
+        color: #ffffff;
+        padding: 2px 10px;
+        border-radius: 12px;
+        font-size: 12px;
+        font-weight: 700;
+        flex-shrink: 0;
+        margin-left: 8px;
+      }}
+    </style>
+    <div class="etf-stage-header-wrap">
+      <span class="etf-stage-title-text">[{safe_sector}] {safe_name}</span>
+      <span class="etf-stage-badge">{safe_stage}</span>
+      <div class="etf-stage-popup-card">
+        <div style="font-weight:700; color:#38bdf8; margin-bottom:4px;">{safe_name} 주요 구성 기업</div>
+        <div style="color:#f8fafc;">{safe_holdings}</div>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def _find_or_install_korean_font_path() -> str | None:
-    """
-    PDF 생성 시 한글이 깨지지 않도록 TTF/OTF 한글 폰트 경로를 탐색하거나 설치
-    """
-    # 1. 프로젝트 내 번들 폰트 우선 확인
+    """PDF 생성 시 한글이 깨지지 않도록 TTF/OTF 한글 폰트 경로를 탐색하거나 설치"""
     here = Path(__file__).resolve()
     candidate_paths = [
         here.parent / "fonts" / "NanumGothic.ttf",
@@ -402,14 +586,20 @@ def _find_or_install_korean_font_path() -> str | None:
         if p.exists():
             return str(p)
 
-    # 2. matplotlib 폰트 매니저에서 한글 지원 폰트 검색
-    kr_keywords = ("nanum", "malgun", "noto sans cjk", "applegothic", "applesdgothic", "unbatang", "baekmuk")
+    kr_keywords = (
+        "nanum",
+        "malgun",
+        "noto sans cjk",
+        "applegothic",
+        "applesdgothic",
+        "unbatang",
+        "baekmuk",
+    )
     for f in fm.fontManager.ttflist:
         low_name = (f.name or "").lower()
         if any(k in low_name for k in kr_keywords) and Path(f.fname).exists():
             return f.fname
 
-    # 3. Linux/Streamlit Cloud 환경에서 나눔폰트 패키지 설치 시도
     if sys.platform.startswith("linux"):
         try:
             subprocess.run(
@@ -456,13 +646,12 @@ def _generate_pdf_bytes(items_serializable: list[dict], run_date_str: str) -> by
     buf = BytesIO()
 
     with PdfPages(buf) as pdf:
-        # 한 페이지당 ETF 2개(1행 2열) 배치
         per_page = 2
         total_pages = max(1, (len(items_serializable) + per_page - 1) // per_page)
 
         for page_idx in range(total_pages):
             batch = items_serializable[page_idx * per_page : (page_idx + 1) * per_page]
-            fig, axes = plt.subplots(1, 2, figsize=(11.69, 6.2))  # A4 가로, 한 행에 2개 배치
+            fig, axes = plt.subplots(1, 2, figsize=(11.69, 6.2))
             fig.patch.set_facecolor("#ffffff")
 
             title_text = (
@@ -498,7 +687,6 @@ def _generate_pdf_bytes(items_serializable: list[dict], run_date_str: str) -> by
                 else:
                     ax.set_title(sub_title, fontsize=9.5, fontweight="bold", pad=8)
 
-                # X축 날짜를 숫자로만 표기 (YYYY-MM-DD)
                 ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
                 ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
                 ax.tick_params(axis="x", labelsize=8, rotation=25)
@@ -528,7 +716,7 @@ def render():
     with col_head:
         st.markdown("## 📊 섹터별 주식단계 분석 (30주 이동평균선 기준)")
         st.caption(
-            f"주식 단계 오름차순(1단계 → 4단계) 정렬 | 최근 2년 주봉 & 30주 이동평균선 | 조회 시각: {run_timestamp}"
+            f"주식 단계 오름차순(1단계 → 4단계) 정렬 | ETF 제목에 마우스를 올리면 주요 구성 기업 표시 | 조회 시각: {run_timestamp}"
         )
     with col_refresh:
         if st.button("🔄 데이터 새로고침", key="refresh_sector_price_stage"):
@@ -611,6 +799,7 @@ def render():
                 "주식 단계": it["stage"],
                 "대분류 섹터": it["sector"],
                 "ETF명": it["name"],
+                "주요 구성 기업": it["holdings"],
                 "종목코드": it["code"],
                 "현재가(원)": f"{it['curr_price']:,.0f}",
                 "30주 이동평균(원)": f"{it['curr_ma30']:,.0f}" if pd.notna(it["curr_ma30"]) else "-",
@@ -632,21 +821,6 @@ def render():
 
             item = filtered_items[item_idx]
             with cols[col_idx]:
-                st.markdown(
-                    f"""
-                    <div style="background-color:#1e293b; border-left:5px solid {item['stage_color']};
-                                padding:8px 14px; border-radius:8px; margin-bottom:6px;
-                                display:flex; justify-content:space-between; align-items:center;">
-                        <span style="color:#f8fafc; font-weight:700; font-size:14px;">
-                            [{item['sector']}] {item['name']}
-                        </span>
-                        <span style="background-color:{item['stage_color']}; color:#ffffff;
-                                     padding:2px 10px; border-radius:12px; font-size:12px; font-weight:700;">
-                            {item['stage']}
-                        </span>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
+                _render_etf_title_with_bubble(item)
                 fig = _build_plotly_weekly_chart(item)
                 st.plotly_chart(fig, use_container_width=True, key=f"chart_{item['code']}_{item_idx}")
