@@ -82,6 +82,7 @@ ETF_TOP_HOLDINGS: dict[str, list[str]] = {
     "TIGER 글로벌AI사이버보안": ["Cloudflare", "Okta ", "Zscaler", "Palo Alto Networks", "Fortinet"],
     "KODEX 웹툰&드라마": ["CJ ENM", "스튜디오드래곤", "카카오", "NAVER", "SAMG엔터"],
     "SOL 우주항공밸류체인": ["에이치브이엠", "스피어", "쎄트렉아이", "인텔리안테크", "대주전자재료"],
+    "마이티 신약포커스바이오액티브": ["올릭스", "오스코텍", "한올바이오파마", "알지노믹스", "한미약품"],
 }
 
 
