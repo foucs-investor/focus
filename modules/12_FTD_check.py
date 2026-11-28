@@ -46,7 +46,7 @@ FALLBACK_KR_STOCKS: list[dict[str, str]] = [
     {"Code": "039030", "Name": "이오테크닉스", "Market": "KOSDAQ"},
 ]
 
-PLOTLY_SCROLL_CONFIG = {
+PLOTLY_INTERACTIVE_CONFIG = {
     "scrollZoom": True,
     "displayModeBar": True,
     "doubleClick": "reset",
@@ -139,7 +139,7 @@ def _resolve_company(query: str, listing_df: pd.DataFrame) -> tuple[str, str, st
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFrame:
+def _fetch_stock_ohlcv(code: str, market: str) -> pd.DataFrame:
     """
     한국 상장종목 일봉 OHLCV 데이터 조회.
     200일 SMA 및 주봉 50주 SMA 계산에 충분한 과거 데이터를 포함해 조회합니다.
@@ -191,18 +191,12 @@ def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFra
     return df
 
 
-def _trim_display_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
-    """이동평균선(20 EMA, 50 SMA, 200 SMA) 계산 후 선택된 표시 기간으로 슬라이싱"""
+def _trim_2y_period(df: pd.DataFrame) -> pd.DataFrame:
+    """이동평균선(20 EMA, 50 SMA, 200 SMA) 계산 후 최근 2년 구간으로 슬라이싱"""
     if df.empty:
         return df
     last_dt = df.index.max()
-    if period == "6mo":
-        return df.loc[df.index >= (last_dt - pd.DateOffset(months=6))].copy()
-    if period == "1y":
-        return df.loc[df.index >= (last_dt - pd.DateOffset(years=1))].copy()
-    if period == "2y":
-        return df.loc[df.index >= (last_dt - pd.DateOffset(years=2))].copy()
-    return df.copy()
+    return df.loc[df.index >= (last_dt - pd.DateOffset(years=2))].copy()
 
 
 def _detect_ftd_signals(
@@ -311,7 +305,7 @@ def _detect_ftd_signals(
 
 
 def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉 + 이동평균선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD 마커 + 거래량 차트 생성"""
+    """일봉(최근 2년) + 이동평균선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD 마커 + 거래량 차트 생성"""
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -438,11 +432,11 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 이동평균선(20 EMA / 50 SMA / 200 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 이동평균선(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
-        dragmode="zoom",
+        dragmode="pan",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
         height=640,
@@ -552,7 +546,7 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
-        dragmode="zoom",
+        dragmode="pan",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
         height=560,
@@ -580,26 +574,18 @@ def render():
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
     st.caption(
-        f"이동평균선: 20일 EMA · 50일 SMA · 200일 SMA 적용 (마우스 스크롤 확대·축소 지원) | 조회 시각: {run_timestamp}"
+        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA 적용 | 마우스 드래그 이동 & 스크롤 확대·축소 | 조회 시각: {run_timestamp}"
     )
 
     listing_df = _load_krx_listing()
 
-    col_in, col_period, col_btn = st.columns([5, 2, 2])
+    col_in, col_btn = st.columns([7, 2])
     with col_in:
         company_input = st.text_input(
             "한국 상장기업명 (또는 6자리 종목코드)",
             value="삼성전자",
             placeholder="예: 삼성전자, SK하이닉스, 한미반도체, 알테오젠",
             key="ftd_company_input",
-        )
-    with col_period:
-        period_opt = st.selectbox(
-            "조회 기간",
-            options=["6mo", "1y", "2y"],
-            index=1,
-            format_func=lambda x: {"6mo": "6개월", "1y": "1년", "2y": "2년"}[x],
-            key="ftd_period_select",
         )
     with col_btn:
         st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
@@ -632,7 +618,7 @@ def render():
     code, company_name, market = resolved
 
     with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 이동평균선을 계산하는 중입니다..."):
-        df_ohlcv_full = _fetch_stock_ohlcv(code, market, period=period_opt)
+        df_ohlcv_full = _fetch_stock_ohlcv(code, market)
 
     if df_ohlcv_full.empty:
         st.error(f"{company_name} ({code})의 주가 시세 데이터를 가져오지 못했습니다.")
@@ -647,7 +633,7 @@ def render():
         vol_mult_prev=float(vol_mult_prev),
         vol_mult_avg20=float(vol_mult_avg20),
     )
-    df_ftd = _trim_display_period(df_ftd_full, period_opt)
+    df_ftd = _trim_2y_period(df_ftd_full)
 
     latest = df_ftd.iloc[-1]
     latest_close = float(latest["Close"])
@@ -661,7 +647,7 @@ def render():
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("종목", f"{company_name} ({code})", market)
     m2.metric("최근 종가", f"{latest_close:,.0f}원", f"{latest_pct:+.2f}%")
-    m3.metric("기간 내 FTD 발생 횟수", f"{len(ftd_events)}회")
+    m3.metric("최근 2년 FTD 발생 횟수", f"{len(ftd_events)}회")
     m4.metric(
         "최근 FTD 발생일",
         last_ftd_str,
@@ -687,12 +673,12 @@ def render():
     st.plotly_chart(
         _build_ftd_chart(df_ftd, company_name, code),
         use_container_width=True,
-        config=PLOTLY_SCROLL_CONFIG,
+        config=PLOTLY_INTERACTIVE_CONFIG,
     )
 
-    st.markdown("### 📋 FTD 발생 이력")
+    st.markdown("### 📋 FTD 발생 이력 (최근 2년)")
     if ftd_events.empty:
-        st.info("설정한 조회 기간 및 FTD 조건에 해당하는 발생일이 없습니다. 파라미터를 조정해 다시 확인해 보세요.")
+        st.info("최근 2년 및 설정한 FTD 조건에 해당하는 발생일이 없습니다. 파라미터를 조정해 다시 확인해 보세요.")
     else:
         history_rows = []
         for dt_idx, r in ftd_events.iloc[::-1].iterrows():
@@ -724,5 +710,5 @@ def render():
     st.plotly_chart(
         _build_weekly_chart(df_ftd_full, company_name, code),
         use_container_width=True,
-        config=PLOTLY_SCROLL_CONFIG,
+        config=PLOTLY_INTERACTIVE_CONFIG,
     )
