@@ -103,7 +103,6 @@ def _resolve_company(query: str, listing_df: pd.DataFrame) -> tuple[str, str, st
     if not q:
         return None
 
-    # 1. 정확히 일치하는 기업명 또는 종목코드 검색
     if not listing_df.empty:
         exact_name = listing_df[listing_df["Name"] == q]
         if not exact_name.empty:
@@ -115,7 +114,6 @@ def _resolve_company(query: str, listing_df: pd.DataFrame) -> tuple[str, str, st
             row = exact_code.iloc[0]
             return str(row["Code"]), str(row["Name"]), str(row["Market"])
 
-        # 2. 부분 문자열 포함 검색 (대소문자 무시)
         partial = listing_df[
             listing_df["Name"].str.contains(q, case=False, na=False, regex=False)
         ]
@@ -123,12 +121,10 @@ def _resolve_company(query: str, listing_df: pd.DataFrame) -> tuple[str, str, st
             row = partial.iloc[0]
             return str(row["Code"]), str(row["Name"]), str(row["Market"])
 
-    # 3. 네이버 검색 폴백
     naver_found = _search_naver_stock_code(q)
     if naver_found:
         return naver_found
 
-    # 4. 6자리 코드 직접 입력 폴백
     cleaned = q.split(".")[0].strip().upper()
     if len(cleaned) == 6 and cleaned.isalnum():
         return cleaned, q, "KRX"
@@ -138,8 +134,13 @@ def _resolve_company(query: str, listing_df: pd.DataFrame) -> tuple[str, str, st
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFrame:
-    """한국 상장종목 일봉 OHLCV 데이터 조회 (FinanceDataReader 우선 -> yfinance .KS/.KQ 폴백)"""
+    """
+    한국 상장종목 일봉 OHLCV 데이터 조회.
+    200일 SMA 계산에 충분한 과거 데이터를 확보하기 위해 여유 기간을 포함해 다운로드한 뒤
+    선택한 표시 기간에 맞춰 필터링합니다.
+    """
     df = pd.DataFrame()
+    fetch_period = "2y" if period in ("6mo", "1y", "2y") else "5y"
 
     try:
         import FinanceDataReader as fdr
@@ -158,7 +159,7 @@ def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFra
 
         for sfx in suffixes:
             try:
-                yf_df = yf.download(f"{code}{sfx}", period=period, auto_adjust=False, progress=False)
+                yf_df = yf.download(f"{code}{sfx}", period=fetch_period, auto_adjust=False, progress=False)
                 if isinstance(yf_df, pd.DataFrame) and not yf_df.empty:
                     if isinstance(yf_df.columns, pd.MultiIndex):
                         yf_df.columns = yf_df.columns.get_level_values(0)
@@ -173,17 +174,6 @@ def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFra
     df.index = pd.to_datetime(df.index)
     df = df.loc[~df.index.duplicated(keep="last")].sort_index()
 
-    # 최근 기간 필터링
-    if period == "6mo":
-        cutoff = df.index.max() - pd.DateOffset(months=6)
-        df = df.loc[df.index >= cutoff]
-    elif period == "1y":
-        cutoff = df.index.max() - pd.DateOffset(years=1)
-        df = df.loc[df.index >= cutoff]
-    elif period == "2y":
-        cutoff = df.index.max() - pd.DateOffset(years=2)
-        df = df.loc[df.index >= cutoff]
-
     needed = ["Open", "High", "Low", "Close", "Volume"]
     if not all(col in df.columns for col in needed):
         return pd.DataFrame()
@@ -196,6 +186,20 @@ def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFra
     return df
 
 
+def _trim_display_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    """이동평균선(20 EMA, 50 SMA, 200 SMA) 계산 후 선택된 표시 기간으로 슬라이싱"""
+    if df.empty:
+        return df
+    last_dt = df.index.max()
+    if period == "6mo":
+        return df.loc[df.index >= (last_dt - pd.DateOffset(months=6))].copy()
+    if period == "1y":
+        return df.loc[df.index >= (last_dt - pd.DateOffset(years=1))].copy()
+    if period == "2y":
+        return df.loc[df.index >= (last_dt - pd.DateOffset(years=2))].copy()
+    return df.copy()
+
+
 def _detect_ftd_signals(
     df: pd.DataFrame,
     pullback_pct: float = -4.0,
@@ -206,21 +210,20 @@ def _detect_ftd_signals(
     vol_mult_avg20: float = 1.0,
 ) -> pd.DataFrame:
     """
-    일봉 OHLCV 기준 Rally Attempt Day 1 및 Follow-Through Day(FTD) 탐지
-    - 직전 20일 고점 대비 `pullback_pct` 이하 조정을 겪은 후 반등하는 날을 랠리 1일차로 설정
-    - 랠리 1일차 이후 `min_day_num` ~ `max_day_num` 거래일 사이에서:
-        1) 당일 종가 상승률 >= `min_ftd_gain_pct`
-        2) 당일 종가 > 전일 종가
-        3) 당일 거래량 >= 전일 거래량 * `vol_mult_prev` 및 20일 평균 거래량 * `vol_mult_avg20`
-      조건을 만족하는 날을 FTD로 기록
-    - 랠리 진행 중 종가가 랠리 저점 대비 추가 급락(-6% 이상)하거나 20일 경과 시 새 랠리 탐색 가능
+    일봉 OHLCV 기준 이동평균선(20일 EMA, 50일 SMA, 200일 SMA) 및
+    Rally Attempt Day 1 / Follow-Through Day(FTD) 탐지
     """
     out = df.copy()
     out["Prev_Close"] = out["Close"].shift(1)
     out["Pct_Change"] = out["Close"].pct_change() * 100.0
     out["Prev_Volume"] = out["Volume"].shift(1)
     out["Vol_MA20"] = out["Volume"].rolling(20, min_periods=5).mean()
-    out["Price_MA50"] = out["Close"].rolling(50, min_periods=10).mean()
+
+    # 이동평균선: 20일 EMA, 50일 SMA, 200일 SMA
+    out["EMA_20"] = out["Close"].ewm(span=20, adjust=False).mean()
+    out["SMA_50"] = out["Close"].rolling(50, min_periods=10).mean()
+    out["SMA_200"] = out["Close"].rolling(200, min_periods=20).mean()
+
     out["High_20D"] = out["High"].rolling(20, min_periods=5).max().shift(1)
     out["Drawdown_From_High20"] = np.where(
         out["High_20D"] > 0,
@@ -251,7 +254,6 @@ def _detect_ftd_signals(
         vol_ma20 = float(row["Vol_MA20"]) if pd.notna(row["Vol_MA20"]) else 0.0
         dd_high20 = float(row["Drawdown_From_High20"]) if pd.notna(row["Drawdown_From_High20"]) else 0.0
 
-        # 기존 랠리 사이클 진행 중 무효화 또는 만료 체크
         if in_rally and rally_start_idx is not None:
             elapsed = i - rally_start_idx + 1
             if rally_low is not None and low_val < rally_low * 0.94:
@@ -265,7 +267,6 @@ def _detect_ftd_signals(
                 rally_low = None
                 ftd_triggered_in_cycle = False
 
-        # 새로운 랠리 시도 1일차 탐색 (조정 국면에서 반등/양봉 전환)
         if not in_rally:
             is_pullback_zone = dd_high20 <= pullback_pct
             is_rebound_day = (close_val > prev_close) or (close_val >= float(row["Open"]) and pct >= 0.0)
@@ -277,7 +278,6 @@ def _detect_ftd_signals(
                 out.iloc[i, out.columns.get_loc("Is_Rally_Day1")] = True
                 out.iloc[i, out.columns.get_loc("Rally_Day_Count")] = 1
 
-        # 진행 중인 랠리 일차 카운트 및 FTD 판별
         if in_rally and rally_start_idx is not None:
             day_num = i - rally_start_idx + 1
             if rally_low is not None:
@@ -297,16 +297,16 @@ def _detect_ftd_signals(
             ):
                 out.iloc[i, out.columns.get_loc("Is_FTD")] = True
                 ftd_triggered_in_cycle = True
+                vol_ratio_str = f"{vol_val / prev_vol:.2f}배" if prev_vol > 0 else "-"
                 out.iloc[i, out.columns.get_loc("FTD_Reason")] = (
-                    f"랠리 {day_num}일차 | 등락률 {pct:+.2f}% | "
-                    f"거래량/전일 {vol_val / prev_vol:.2f}배" if prev_vol > 0 else f"랠리 {day_num}일차 | 등락률 {pct:+.2f}%"
+                    f"랠리 {day_num}일차 | 등락률 {pct:+.2f}% | 거래량/전일 {vol_ratio_str}"
                 )
 
     return out
 
 
 def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """주가 + 50일선 + Day1/FTD 마커 + 거래량 차트 생성"""
+    """일봉 + 이동평균선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD 마커 + 거래량 차트 생성"""
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -333,10 +333,37 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
     fig.add_trace(
         go.Scatter(
             x=df.index,
-            y=df["Price_MA50"],
+            y=df["EMA_20"],
             mode="lines",
-            name="50일 이평선",
+            name="20일 EMA",
+            line=dict(color="#22c55e", width=1.6),
+            hovertemplate="날짜: %{x|%Y-%m-%d}<br>20일 EMA: %{y:,.0f}원<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["SMA_50"],
+            mode="lines",
+            name="50일 SMA",
             line=dict(color="#f59e0b", width=1.8),
+            hovertemplate="날짜: %{x|%Y-%m-%d}<br>50일 SMA: %{y:,.0f}원<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=df.index,
+            y=df["SMA_200"],
+            mode="lines",
+            name="200일 SMA",
+            line=dict(color="#a855f7", width=2.0),
+            hovertemplate="날짜: %{x|%Y-%m-%d}<br>200일 SMA: %{y:,.0f}원<extra></extra>",
         ),
         row=1,
         col=1,
@@ -406,7 +433,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - Follow-Through Day (FTD) 분석 차트</b>",
+            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 이동평균선(20 EMA / 50 SMA / 200 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
@@ -431,12 +458,119 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
     return fig
 
 
+def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) -> go.Figure:
+    """일봉 데이터를 주봉(W-FRI)으로 변환한 주봉 차트 + 이동평균선(20주 EMA / 50주 SMA) + 거래량"""
+    weekly = pd.DataFrame({
+        "Open": df_daily["Open"].resample("W-FRI").first(),
+        "High": df_daily["High"].resample("W-FRI").max(),
+        "Low": df_daily["Low"].resample("W-FRI").min(),
+        "Close": df_daily["Close"].resample("W-FRI").last(),
+        "Volume": df_daily["Volume"].resample("W-FRI").sum(),
+    }).dropna(subset=["Open", "High", "Low", "Close"])
+
+    weekly["EMA_20W"] = weekly["Close"].ewm(span=20, adjust=False).mean()
+    weekly["SMA_50W"] = weekly["Close"].rolling(50, min_periods=10).mean()
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.06,
+        row_heights=[0.72, 0.28],
+    )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=weekly.index,
+            open=weekly["Open"],
+            high=weekly["High"],
+            low=weekly["Low"],
+            close=weekly["Close"],
+            name="주봉",
+            increasing_line_color="#ef4444",
+            decreasing_line_color="#3b82f6",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=weekly.index,
+            y=weekly["EMA_20W"],
+            mode="lines",
+            name="20주 EMA",
+            line=dict(color="#22c55e", width=1.8),
+            hovertemplate="주봉 날짜: %{x|%Y-%m-%d}<br>20주 EMA: %{y:,.0f}원<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=weekly.index,
+            y=weekly["SMA_50W"],
+            mode="lines",
+            name="50주 SMA",
+            line=dict(color="#f59e0b", width=2.0),
+            hovertemplate="주봉 날짜: %{x|%Y-%m-%d}<br>50주 SMA: %{y:,.0f}원<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    vol_colors = [
+        "#ef4444" if c >= o else "#3b82f6"
+        for o, c in zip(weekly["Open"], weekly["Close"])
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=weekly.index,
+            y=weekly["Volume"],
+            name="주간 거래량",
+            marker_color=vol_colors,
+            opacity=0.75,
+        ),
+        row=2,
+        col=1,
+    )
+
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{company_name} ({code}) - 주봉 차트 (20주 EMA / 50주 SMA)</b>",
+            font=dict(size=18, color="#f8fafc"),
+            x=0.02,
+        ),
+        paper_bgcolor="#0f172a",
+        plot_bgcolor="#0f172a",
+        height=560,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=45, r=20, t=55, b=30),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.01,
+            xanchor="right",
+            x=1.0,
+            font=dict(color="#e2e8f0", size=11),
+        ),
+        xaxis2=dict(tickformat="%Y-%m-%d", gridcolor="#1e293b", tickfont=dict(color="#cbd5e1")),
+        xaxis=dict(gridcolor="#1e293b", tickfont=dict(color="#cbd5e1")),
+        yaxis=dict(gridcolor="#1e293b", tickformat=",", tickfont=dict(color="#cbd5e1")),
+        yaxis2=dict(gridcolor="#1e293b", tickformat=",", tickfont=dict(color="#cbd5e1")),
+    )
+    return fig
+
+
 def render():
     now = datetime.now(KST)
     run_timestamp = now.strftime("%Y-%m-%d %H:%M:%S (KST)")
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
-    st.caption(f"조정 이후 반등 랠리에서 나타나는 팔로우 스루 데이(FTD) 신호 탐지 | 조회 시각: {run_timestamp}")
+    st.caption(
+        f"이동평균선: 20일 EMA · 50일 SMA · 200일 SMA 적용 | 조회 시각: {run_timestamp}"
+    )
 
     listing_df = _load_krx_listing()
 
@@ -486,15 +620,15 @@ def render():
 
     code, company_name, market = resolved
 
-    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호를 분석하는 중입니다..."):
-        df_ohlcv = _fetch_stock_ohlcv(code, market, period=period_opt)
+    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 이동평균선을 계산하는 중입니다..."):
+        df_ohlcv_full = _fetch_stock_ohlcv(code, market, period=period_opt)
 
-    if df_ohlcv.empty:
+    if df_ohlcv_full.empty:
         st.error(f"{company_name} ({code})의 주가 시세 데이터를 가져오지 못했습니다.")
         return
 
-    df_ftd = _detect_ftd_signals(
-        df_ohlcv,
+    df_ftd_full = _detect_ftd_signals(
+        df_ohlcv_full,
         pullback_pct=float(pullback_pct),
         min_ftd_gain_pct=float(min_ftd_gain),
         min_day_num=int(min_day_num),
@@ -502,6 +636,7 @@ def render():
         vol_mult_prev=float(vol_mult_prev),
         vol_mult_avg20=float(vol_mult_avg20),
     )
+    df_ftd = _trim_display_period(df_ftd_full, period_opt)
 
     latest = df_ftd.iloc[-1]
     latest_close = float(latest["Close"])
@@ -521,6 +656,14 @@ def render():
         last_ftd_str,
         f"{days_since_ftd}일 경과" if days_since_ftd is not None else "신호 미발생",
     )
+
+    ema20_val = float(latest["EMA_20"]) if pd.notna(latest["EMA_20"]) else np.nan
+    sma50_val = float(latest["SMA_50"]) if pd.notna(latest["SMA_50"]) else np.nan
+    sma200_val = float(latest["SMA_200"]) if pd.notna(latest["SMA_200"]) else np.nan
+    ma_c1, ma_c2, ma_c3 = st.columns(3)
+    ma_c1.metric("20일 EMA", f"{ema20_val:,.0f}원" if pd.notna(ema20_val) else "-")
+    ma_c2.metric("50일 SMA", f"{sma50_val:,.0f}원" if pd.notna(sma50_val) else "-")
+    ma_c3.metric("200일 SMA", f"{sma200_val:,.0f}원" if pd.notna(sma200_val) else "-")
 
     if bool(latest["Is_FTD"]):
         st.success(f"🚀 **오늘({df_ftd.index[-1].strftime('%Y-%m-%d')}) FTD 신호가 발생했습니다!** — {latest['FTD_Reason']}")
@@ -553,8 +696,14 @@ def render():
                 "랠리 일차": f"{int(r['Rally_Day_Count'])}일차" if pd.notna(r["Rally_Day_Count"]) else "-",
                 "종가(원)": f"{float(r['Close']):,.0f}",
                 "당일 등락률": f"{float(r['Pct_Change']):+.2f}%" if pd.notna(r["Pct_Change"]) else "-",
-                "거래량": f"{int(r['Volume']):,}",
+                "20일 EMA": f"{float(r['EMA_20']):,.0f}" if pd.notna(r["EMA_20"]) else "-",
+                "50일 SMA": f"{float(r['SMA_50']):,.0f}" if pd.notna(r["SMA_50"]) else "-",
+                "200일 SMA": f"{float(r['SMA_200']):,.0f}" if pd.notna(r["SMA_200"]) else "-",
                 "전일 대비 거래량": f"{vol_ratio_prev:.2f}배" if pd.notna(vol_ratio_prev) else "-",
                 "20일 평균 대비": f"{vol_ratio_avg20:.2f}배" if pd.notna(vol_ratio_avg20) else "-",
             })
         st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### 📈 주봉 차트")
+    st.plotly_chart(_build_weekly_chart(df_ftd_full, company_name, code), use_container_width=True)
