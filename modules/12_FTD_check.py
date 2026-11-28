@@ -46,6 +46,12 @@ FALLBACK_KR_STOCKS: list[dict[str, str]] = [
     {"Code": "039030", "Name": "이오테크닉스", "Market": "KOSDAQ"},
 ]
 
+PLOTLY_SCROLL_CONFIG = {
+    "scrollZoom": True,
+    "displayModeBar": True,
+    "doubleClick": "reset",
+}
+
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _load_krx_listing() -> pd.DataFrame:
@@ -139,7 +145,7 @@ def _fetch_stock_ohlcv(code: str, market: str, period: str = "1y") -> pd.DataFra
     200일 SMA 및 주봉 50주 SMA 계산에 충분한 과거 데이터를 포함해 조회합니다.
     """
     df = pd.DataFrame()
-    fetch_period = "2y" if period in ("6mo", "1y", "2y") else "5y"
+    fetch_period = "5y"
 
     try:
         import FinanceDataReader as fdr
@@ -436,6 +442,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
+        dragmode="zoom",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
         height=640,
@@ -458,7 +465,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
 
 
 def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉 데이터를 주봉(W-FRI)으로 변환 후 이평선 계산 뒤 최근 1년만 표기하는 차트"""
+    """일봉 데이터를 주봉(W-FRI)으로 변환 후 이평선 계산 뒤 최근 2년만 표기하는 차트"""
     weekly = pd.DataFrame({
         "Open": df_daily["Open"].resample("W-FRI").first(),
         "High": df_daily["High"].resample("W-FRI").max(),
@@ -471,8 +478,8 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
     weekly["SMA_50W"] = weekly["Close"].rolling(50, min_periods=10).mean()
 
     if not weekly.empty:
-        cutoff_1y = weekly.index.max() - pd.DateOffset(years=1)
-        weekly = weekly.loc[weekly.index >= cutoff_1y].copy()
+        cutoff_2y = weekly.index.max() - pd.DateOffset(years=2)
+        weekly = weekly.loc[weekly.index >= cutoff_2y].copy()
 
     fig = make_subplots(
         rows=2,
@@ -541,10 +548,11 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 주봉 차트 (최근 1년 · 20주 EMA / 50주 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 주봉 차트 (최근 2년 · 20주 EMA / 50주 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
+        dragmode="zoom",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
         height=560,
@@ -572,7 +580,7 @@ def render():
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
     st.caption(
-        f"이동평균선: 20일 EMA · 50일 SMA · 200일 SMA 적용 | 조회 시각: {run_timestamp}"
+        f"이동평균선: 20일 EMA · 50일 SMA · 200일 SMA 적용 (마우스 스크롤 확대·축소 지원) | 조회 시각: {run_timestamp}"
     )
 
     listing_df = _load_krx_listing()
@@ -676,7 +684,11 @@ def render():
             f"(FTD 판별 구간: {int(min_day_num)}~{int(max_day_num)}일차)."
         )
 
-    st.plotly_chart(_build_ftd_chart(df_ftd, company_name, code), use_container_width=True)
+    st.plotly_chart(
+        _build_ftd_chart(df_ftd, company_name, code),
+        use_container_width=True,
+        config=PLOTLY_SCROLL_CONFIG,
+    )
 
     st.markdown("### 📋 FTD 발생 이력")
     if ftd_events.empty:
@@ -708,5 +720,9 @@ def render():
         st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.markdown("### 📈 주봉 차트 (최근 1년)")
-    st.plotly_chart(_build_weekly_chart(df_ftd_full, company_name, code), use_container_width=True)
+    st.markdown("### 📈 주봉 차트 (최근 2년)")
+    st.plotly_chart(
+        _build_weekly_chart(df_ftd_full, company_name, code),
+        use_container_width=True,
+        config=PLOTLY_SCROLL_CONFIG,
+    )
