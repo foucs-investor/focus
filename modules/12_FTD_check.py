@@ -199,124 +199,153 @@ def _trim_2y_period(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[df.index >= (last_dt - pd.DateOffset(years=2))].copy()
 
 
-def _detect_support_resistance(
+def _detect_trading_zones(
     df: pd.DataFrame,
     window: int = 8,
-    tolerance_pct: float = 0.018,
-    max_levels: int = 3,
-) -> tuple[list[float], list[float]]:
+    band_width_pct: float = 0.035,
+    max_zones: int = 3,
+) -> list[dict]:
     """
-    OHLCV 데이터에서 스윙 고점/저점 클러스터링을 통해
-    현재 종가 기준 주요 저항선(resistances)과 지지선(supports) 가격 리스트를 추출합니다.
+    OHLCV 데이터에서 주요 스윙 고점·저점 및 종가 밀집도를 바탕으로
+    핵심 트레이딩 구간(low_price ~ high_price)을 추출합니다.
+    반환: [{'low': float, 'high': float, 'mid': float, 'score': float, 'role': str}, ...]
     """
     if df.empty or len(df) < window * 2 + 1:
-        return [], []
+        return []
 
     highs = df["High"].to_numpy(dtype=float)
     lows = df["Low"].to_numpy(dtype=float)
-    last_close = float(df["Close"].iloc[-1])
+    closes = df["Close"].to_numpy(dtype=float)
+    last_close = float(closes[-1])
     n = len(df)
 
-    swing_prices: list[tuple[float, int]] = []
+    anchor_points: list[tuple[float, int]] = []
     for i in range(window, n - window):
-        local_high = highs[i - window : i + window + 1].max()
-        local_low = lows[i - window : i + window + 1].min()
-        if highs[i] >= local_high:
-            swing_prices.append((float(highs[i]), i))
-        if lows[i] <= local_low:
-            swing_prices.append((float(lows[i]), i))
+        if highs[i] >= highs[i - window : i + window + 1].max():
+            anchor_points.append((float(highs[i]), i))
+        if lows[i] <= lows[i - window : i + window + 1].min():
+            anchor_points.append((float(lows[i]), i))
 
-    # 최근 고점/저점도 후보에 포함
-    swing_prices.append((float(df["High"].max()), n - 1))
-    swing_prices.append((float(df["Low"].min()), n - 1))
+    # 최근 구간 극값 보완
+    recent_slice = df.iloc[max(0, n - max(window * 3, 20)) :]
+    anchor_points.append((float(recent_slice["High"].max()), n - 1))
+    anchor_points.append((float(recent_slice["Low"].min()), n - 1))
 
-    # 가격순 정렬 후 인접한 가격대(tolerance_pct 이내) 클러스터 병합
-    swing_prices.sort(key=lambda x: x[0])
+    anchor_points.sort(key=lambda x: x[0])
     clusters: list[dict] = []
-    for price, idx in swing_prices:
+    for price, idx in anchor_points:
         if price <= 0:
             continue
         if not clusters:
             clusters.append({"prices": [price], "last_idx": idx, "count": 1})
         else:
             avg_p = float(np.mean(clusters[-1]["prices"]))
-            if abs(price - avg_p) / avg_p <= tolerance_pct:
+            if abs(price - avg_p) / avg_p <= band_width_pct * 0.85:
                 clusters[-1]["prices"].append(price)
                 clusters[-1]["last_idx"] = max(clusters[-1]["last_idx"], idx)
                 clusters[-1]["count"] += 1
             else:
                 clusters.append({"prices": [price], "last_idx": idx, "count": 1})
 
-    resistances_raw: list[tuple[float, float]] = []
-    supports_raw: list[tuple[float, float]] = []
-
+    zones: list[dict] = []
     for c in clusters:
-        level_price = float(np.mean(c["prices"]))
-        score = c["count"] * 2.0 + (c["last_idx"] / max(n, 1))
-        if level_price > last_close * 1.003:
-            resistances_raw.append((level_price, score))
-        elif level_price < last_close * 0.997:
-            supports_raw.append((level_price, score))
+        mid = float(np.mean(c["prices"]))
+        half_span = mid * (band_width_pct * 0.5)
+        raw_low = min(c["prices"])
+        raw_high = max(c["prices"])
+        z_low = min(raw_low, mid - half_span)
+        z_high = max(raw_high, mid + half_span)
 
-    # 현재가에서 가까운 상위 후보를 우선 확보하되 터치 횟수/최근성 반영
-    resistances_raw.sort(key=lambda x: x[0])
-    top_res = sorted(
-        sorted(resistances_raw[: max_levels + 3], key=lambda x: -x[1])[:max_levels],
-        key=lambda x: x[0],
-    )
+        # 구간 내 실제 종가 체류 횟수로 거래 밀집도 가중치 부여
+        in_zone_closes = int(np.sum((closes >= z_low) & (closes <= z_high)))
+        recency = c["last_idx"] / max(n, 1)
+        score = c["count"] * 2.5 + in_zone_closes * 0.35 + recency * 2.0
 
-    supports_raw.sort(key=lambda x: -x[0])
-    top_sup = sorted(
-        sorted(supports_raw[: max_levels + 3], key=lambda x: -x[1])[:max_levels],
-        key=lambda x: -x[0],
-    )
+        if z_low > last_close * 1.005:
+            role = "상단 트레이딩 구간"
+        elif z_high < last_close * 0.995:
+            role = "하단 트레이딩 구간"
+        else:
+            role = "현재 트레이딩 구간"
 
-    return [p for p, _ in top_res], [p for p, _ in top_sup]
+        zones.append({
+            "low": float(z_low),
+            "high": float(z_high),
+            "mid": float(mid),
+            "score": float(score),
+            "role": role,
+        })
+
+    # 겹치는 구간 병합
+    zones.sort(key=lambda z: z["mid"])
+    merged: list[dict] = []
+    for z in zones:
+        if not merged:
+            merged.append(z)
+        else:
+            prev = merged[-1]
+            if z["low"] <= prev["high"] * 1.012:
+                prev["low"] = min(prev["low"], z["low"])
+                prev["high"] = max(prev["high"], z["high"])
+                prev["mid"] = (prev["low"] + prev["high"]) * 0.5
+                prev["score"] = max(prev["score"], z["score"]) + 1.0
+                if prev["low"] <= last_close <= prev["high"]:
+                    prev["role"] = "현재 트레이딩 구간"
+                elif prev["low"] > last_close:
+                    prev["role"] = "상단 트레이딩 구간"
+                else:
+                    prev["role"] = "하단 트레이딩 구간"
+            else:
+                merged.append(z)
+
+    top_zones = sorted(merged, key=lambda z: -z["score"])[:max_zones]
+    top_zones.sort(key=lambda z: -z["mid"])
+    return top_zones
 
 
-def _add_support_resistance_to_fig(
+def _add_trading_zones_to_fig(
     fig: go.Figure,
     df: pd.DataFrame,
-    resistances: list[float],
-    supports: list[float],
+    zones: list[dict],
 ) -> None:
-    """차트의 주가 영역(row=1)에 지지·저항 수평선과 오른쪽 가격 라벨을 표기"""
-    if df.empty:
+    """차트 주가 영역(row=1)에 트레이딩 구간 밴드와 오른쪽 가격 범위를 표기"""
+    if df.empty or not zones:
         return
 
     y_min = float(df["Low"].min())
     y_max = float(df["High"].max())
     y_span = max(y_max - y_min, 1.0)
-    min_gap = y_span * 0.032  # 오른쪽 라벨 텍스트 겹침 방지 최소 간격
+    min_gap = y_span * 0.045
 
-    labeled_levels: list[tuple[float, str, str, str]] = []
-    for idx, price in enumerate(resistances, start=1):
-        labeled_levels.append((price, f"저항{idx} {price:,.0f}원", "#fb7185", "rgba(136, 19, 55, 0.88)"))
-    for idx, price in enumerate(supports, start=1):
-        labeled_levels.append((price, f"지지{idx} {price:,.0f}원", "#38bdf8", "rgba(12, 74, 110, 0.88)"))
+    palette = [
+        ("rgba(56, 189, 248, 0.12)", "#38bdf8", "rgba(12, 74, 110, 0.90)"),
+        ("rgba(251, 146, 60, 0.12)", "#fb923c", "rgba(124, 45, 18, 0.90)"),
+        ("rgba(167, 139, 250, 0.12)", "#a78bfa", "rgba(76, 29, 149, 0.90)"),
+    ]
 
-    # 수평선 추가
-    for price, _, line_color, _ in labeled_levels:
-        fig.add_hline(
-            y=price,
-            line_dash="dot",
-            line_width=1.2,
-            line_color=line_color,
-            opacity=0.82,
+    label_items: list[tuple[float, str, str, str]] = []
+    for idx, z in enumerate(zones, start=1):
+        fill_rgba, border_hex, badge_bg = palette[(idx - 1) % len(palette)]
+        fig.add_hrect(
+            y0=z["low"],
+            y1=z["high"],
+            fillcolor=fill_rgba,
+            line=dict(color=border_hex, width=1.0, dash="dot"),
             row=1,
             col=1,
         )
+        text = f"구간{idx}: {z['low']:,.0f} ~ {z['high']:,.0f}원"
+        label_items.append((z["mid"], text, border_hex, badge_bg))
 
-    # 오른쪽 가격 라벨 위치 겹침 보정 후 annotation 추가
-    labeled_levels.sort(key=lambda x: x[0])
+    label_items.sort(key=lambda x: x[0])
     adjusted_y: list[float] = []
-    for price, _, _, _ in labeled_levels:
-        y_pos = price
+    for mid_p, _, _, _ in label_items:
+        y_pos = mid_p
         if adjusted_y and (y_pos - adjusted_y[-1]) < min_gap:
             y_pos = adjusted_y[-1] + min_gap
         adjusted_y.append(y_pos)
 
-    for (price, label_text, border_color, bg_color), y_pos in zip(labeled_levels, adjusted_y):
+    for (_, label_text, border_hex, badge_bg), y_pos in zip(label_items, adjusted_y):
         fig.add_annotation(
             x=1.004,
             xref="paper",
@@ -326,9 +355,9 @@ def _add_support_resistance_to_fig(
             showarrow=False,
             xanchor="left",
             yanchor="middle",
-            font=dict(color="#f8fafc", size=11),
-            bgcolor=bg_color,
-            bordercolor=border_color,
+            font=dict(color="#f8fafc", size=10.5),
+            bgcolor=badge_bg,
+            bordercolor=border_hex,
             borderwidth=1,
             borderpad=3,
         )
@@ -491,7 +520,7 @@ def _detect_ftd_signals(
 
 
 def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉(최근 2년) + 이평선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 우측 지지/저항 표기"""
+    """일봉(최근 2년) + 이평선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 우측 트레이딩 구간"""
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -651,13 +680,13 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
         col=1,
     )
 
-    # 주요 지지/저항선 계산 및 차트 오른쪽 가격 라벨 표기
-    resistances, supports = _detect_support_resistance(df, window=8, tolerance_pct=0.018, max_levels=3)
-    _add_support_resistance_to_fig(fig, df, resistances, supports)
+    # 트레이딩 구간 계산 및 차트 오른쪽 가격 범위 표기
+    zones = _detect_trading_zones(df, window=8, band_width_pct=0.035, max_zones=3)
+    _add_trading_zones_to_fig(fig, df, zones)
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 지지·저항선(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 트레이딩 구간(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
@@ -666,7 +695,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
         plot_bgcolor="#0f172a",
         height=650,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=45, r=145, t=55, b=30),
+        margin=dict(l=45, r=195, t=55, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -684,7 +713,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
 
 
 def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉 데이터를 주봉(W-FRI)으로 변환 후 최근 2년 주봉 차트 + 오른쪽 지지/저항 가격 표기"""
+    """일봉 데이터를 주봉(W-FRI)으로 변환 후 최근 2년 주봉 차트 + 오른쪽 트레이딩 구간 표기"""
     weekly = pd.DataFrame({
         "Open": df_daily["Open"].resample("W-FRI").first(),
         "High": df_daily["High"].resample("W-FRI").max(),
@@ -765,13 +794,13 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
         col=1,
     )
 
-    # 주봉 기준 주요 지지/저항선 계산 및 차트 오른쪽 가격 라벨 표기
-    resistances_w, supports_w = _detect_support_resistance(weekly, window=4, tolerance_pct=0.022, max_levels=3)
-    _add_support_resistance_to_fig(fig, weekly, resistances_w, supports_w)
+    # 주봉 기준 트레이딩 구간 계산 및 차트 오른쪽 가격 범위 표기
+    zones_w = _detect_trading_zones(weekly, window=4, band_width_pct=0.045, max_zones=3)
+    _add_trading_zones_to_fig(fig, weekly, zones_w)
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 주봉 차트 및 지지·저항선 (최근 2년 · 20주 EMA / 50주 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 주봉 차트 및 트레이딩 구간 (최근 2년 · 20주 EMA / 50주 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
@@ -780,7 +809,7 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
         plot_bgcolor="#0f172a",
         height=570,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=45, r=145, t=55, b=30),
+        margin=dict(l=45, r=195, t=55, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -803,7 +832,7 @@ def render():
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
     st.caption(
-        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA | FTD(★) · FTD 깨짐(✕) · 우측 지지/저항 표기 | 조회 시각: {run_timestamp}"
+        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA | FTD(★) · FTD 깨짐(✕) · 우측 트레이딩 구간 | 조회 시각: {run_timestamp}"
     )
 
     listing_df = _load_krx_listing()
@@ -846,7 +875,7 @@ def render():
 
     code, company_name, market = resolved
 
-    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 지지·저항선을 계산하는 중입니다..."):
+    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 트레이딩 구간을 계산하는 중입니다..."):
         df_ohlcv_full = _fetch_stock_ohlcv(code, market)
 
     if df_ohlcv_full.empty:
