@@ -199,6 +199,141 @@ def _trim_2y_period(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[df.index >= (last_dt - pd.DateOffset(years=2))].copy()
 
 
+def _detect_support_resistance(
+    df: pd.DataFrame,
+    window: int = 8,
+    tolerance_pct: float = 0.018,
+    max_levels: int = 3,
+) -> tuple[list[float], list[float]]:
+    """
+    OHLCV 데이터에서 스윙 고점/저점 클러스터링을 통해
+    현재 종가 기준 주요 저항선(resistances)과 지지선(supports) 가격 리스트를 추출합니다.
+    """
+    if df.empty or len(df) < window * 2 + 1:
+        return [], []
+
+    highs = df["High"].to_numpy(dtype=float)
+    lows = df["Low"].to_numpy(dtype=float)
+    last_close = float(df["Close"].iloc[-1])
+    n = len(df)
+
+    swing_prices: list[tuple[float, int]] = []
+    for i in range(window, n - window):
+        local_high = highs[i - window : i + window + 1].max()
+        local_low = lows[i - window : i + window + 1].min()
+        if highs[i] >= local_high:
+            swing_prices.append((float(highs[i]), i))
+        if lows[i] <= local_low:
+            swing_prices.append((float(lows[i]), i))
+
+    # 최근 고점/저점도 후보에 포함
+    swing_prices.append((float(df["High"].max()), n - 1))
+    swing_prices.append((float(df["Low"].min()), n - 1))
+
+    # 가격순 정렬 후 인접한 가격대(tolerance_pct 이내) 클러스터 병합
+    swing_prices.sort(key=lambda x: x[0])
+    clusters: list[dict] = []
+    for price, idx in swing_prices:
+        if price <= 0:
+            continue
+        if not clusters:
+            clusters.append({"prices": [price], "last_idx": idx, "count": 1})
+        else:
+            avg_p = float(np.mean(clusters[-1]["prices"]))
+            if abs(price - avg_p) / avg_p <= tolerance_pct:
+                clusters[-1]["prices"].append(price)
+                clusters[-1]["last_idx"] = max(clusters[-1]["last_idx"], idx)
+                clusters[-1]["count"] += 1
+            else:
+                clusters.append({"prices": [price], "last_idx": idx, "count": 1})
+
+    resistances_raw: list[tuple[float, float]] = []
+    supports_raw: list[tuple[float, float]] = []
+
+    for c in clusters:
+        level_price = float(np.mean(c["prices"]))
+        score = c["count"] * 2.0 + (c["last_idx"] / max(n, 1))
+        if level_price > last_close * 1.003:
+            resistances_raw.append((level_price, score))
+        elif level_price < last_close * 0.997:
+            supports_raw.append((level_price, score))
+
+    # 현재가에서 가까운 상위 후보를 우선 확보하되 터치 횟수/최근성 반영
+    resistances_raw.sort(key=lambda x: x[0])
+    top_res = sorted(
+        sorted(resistances_raw[: max_levels + 3], key=lambda x: -x[1])[:max_levels],
+        key=lambda x: x[0],
+    )
+
+    supports_raw.sort(key=lambda x: -x[0])
+    top_sup = sorted(
+        sorted(supports_raw[: max_levels + 3], key=lambda x: -x[1])[:max_levels],
+        key=lambda x: -x[0],
+    )
+
+    return [p for p, _ in top_res], [p for p, _ in top_sup]
+
+
+def _add_support_resistance_to_fig(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    resistances: list[float],
+    supports: list[float],
+) -> None:
+    """차트의 주가 영역(row=1)에 지지·저항 수평선과 오른쪽 가격 라벨을 표기"""
+    if df.empty:
+        return
+
+    y_min = float(df["Low"].min())
+    y_max = float(df["High"].max())
+    y_span = max(y_max - y_min, 1.0)
+    min_gap = y_span * 0.032  # 오른쪽 라벨 텍스트 겹침 방지 최소 간격
+
+    labeled_levels: list[tuple[float, str, str, str]] = []
+    for idx, price in enumerate(resistances, start=1):
+        labeled_levels.append((price, f"저항{idx} {price:,.0f}원", "#fb7185", "rgba(136, 19, 55, 0.88)"))
+    for idx, price in enumerate(supports, start=1):
+        labeled_levels.append((price, f"지지{idx} {price:,.0f}원", "#38bdf8", "rgba(12, 74, 110, 0.88)"))
+
+    # 수평선 추가
+    for price, _, line_color, _ in labeled_levels:
+        fig.add_hline(
+            y=price,
+            line_dash="dot",
+            line_width=1.2,
+            line_color=line_color,
+            opacity=0.82,
+            row=1,
+            col=1,
+        )
+
+    # 오른쪽 가격 라벨 위치 겹침 보정 후 annotation 추가
+    labeled_levels.sort(key=lambda x: x[0])
+    adjusted_y: list[float] = []
+    for price, _, _, _ in labeled_levels:
+        y_pos = price
+        if adjusted_y and (y_pos - adjusted_y[-1]) < min_gap:
+            y_pos = adjusted_y[-1] + min_gap
+        adjusted_y.append(y_pos)
+
+    for (price, label_text, border_color, bg_color), y_pos in zip(labeled_levels, adjusted_y):
+        fig.add_annotation(
+            x=1.004,
+            xref="paper",
+            y=y_pos,
+            yref="y",
+            text=f"<b>{label_text}</b>",
+            showarrow=False,
+            xanchor="left",
+            yanchor="middle",
+            font=dict(color="#f8fafc", size=11),
+            bgcolor=bg_color,
+            bordercolor=border_color,
+            borderwidth=1,
+            borderpad=3,
+        )
+
+
 def _detect_ftd_signals(
     df: pd.DataFrame,
     pullback_pct: float = -4.0,
@@ -211,12 +346,6 @@ def _detect_ftd_signals(
     """
     일봉 OHLCV 기준 이동평균선(20일 EMA, 50일 SMA, 200일 SMA) 및
     Rally Attempt Day 1 / Follow-Through Day(FTD) / FTD 깨짐(실패) 탐지
-
-    [FTD 깨짐(실패) 기준]
-    FTD 발생 이후 활성 FTD 추세가 유지되는 동안 다음 중 하나가 발생하면 FTD 깨짐으로 판정:
-    1) 종가가 FTD 당일 저가(FTD_Low) 미만으로 마감
-    2) 종가가 해당 랠리 구간의 최저가(Rally_Low) 미만으로 마감
-    3) FTD 발생 직후 5거래일 이내에 분배일(전일 대비 거래량 증가 + 등락률 <= -0.2%)이 3회 누적
     """
     out = df.copy()
     out["Prev_Close"] = out["Close"].shift(1)
@@ -250,7 +379,6 @@ def _detect_ftd_signals(
     rally_low: float | None = None
     ftd_triggered_in_cycle = False
 
-    # 활성 FTD 추적용 상태 변수
     active_ftd_idx: int | None = None
     active_ftd_low: float | None = None
     active_ftd_rally_low: float | None = None
@@ -293,7 +421,6 @@ def _detect_ftd_signals(
                 out.iloc[active_ftd_idx, out.columns.get_loc("FTD_Status")] = f"❌ 깨짐 ({broken_date_str})"
                 out.iloc[active_ftd_idx, out.columns.get_loc("FTD_Broken_Date")] = broken_date_str
 
-                # 활성 FTD 종료 및 새 랠리 탐색 가능 상태로 전환
                 active_ftd_idx = None
                 active_ftd_low = None
                 active_ftd_rally_low = None
@@ -364,7 +491,7 @@ def _detect_ftd_signals(
 
 
 def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉(최근 2년) + 이동평균선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 거래량 차트"""
+    """일봉(최근 2년) + 이평선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 우측 지지/저항 표기"""
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -475,7 +602,6 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
             col=1,
         )
 
-    # FTD 깨짐(무효화) X 표기
     failed_df = df[df["Is_FTD_Failed"]]
     if not failed_df.empty:
         fig.add_trace(
@@ -525,18 +651,22 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
         col=1,
     )
 
+    # 주요 지지/저항선 계산 및 차트 오른쪽 가격 라벨 표기
+    resistances, supports = _detect_support_resistance(df, window=8, tolerance_pct=0.018, max_levels=3)
+    _add_support_resistance_to_fig(fig, df, resistances, supports)
+
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 이동평균선(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 지지·저항선(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
         dragmode="pan",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
-        height=640,
+        height=650,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=45, r=20, t=55, b=30),
+        margin=dict(l=45, r=145, t=55, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -554,7 +684,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
 
 
 def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉 데이터를 주봉(W-FRI)으로 변환 후 이평선 계산 뒤 최근 2년만 표기하는 차트"""
+    """일봉 데이터를 주봉(W-FRI)으로 변환 후 최근 2년 주봉 차트 + 오른쪽 지지/저항 가격 표기"""
     weekly = pd.DataFrame({
         "Open": df_daily["Open"].resample("W-FRI").first(),
         "High": df_daily["High"].resample("W-FRI").max(),
@@ -635,18 +765,22 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
         col=1,
     )
 
+    # 주봉 기준 주요 지지/저항선 계산 및 차트 오른쪽 가격 라벨 표기
+    resistances_w, supports_w = _detect_support_resistance(weekly, window=4, tolerance_pct=0.022, max_levels=3)
+    _add_support_resistance_to_fig(fig, weekly, resistances_w, supports_w)
+
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 주봉 차트 (최근 2년 · 20주 EMA / 50주 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 주봉 차트 및 지지·저항선 (최근 2년 · 20주 EMA / 50주 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
         dragmode="pan",
         paper_bgcolor="#0f172a",
         plot_bgcolor="#0f172a",
-        height=560,
+        height=570,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=45, r=20, t=55, b=30),
+        margin=dict(l=45, r=145, t=55, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -669,7 +803,7 @@ def render():
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
     st.caption(
-        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA | FTD(★) 및 FTD 깨짐(✕) 표기 | 조회 시각: {run_timestamp}"
+        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA | FTD(★) · FTD 깨짐(✕) · 우측 지지/저항 표기 | 조회 시각: {run_timestamp}"
     )
 
     listing_df = _load_krx_listing()
@@ -712,7 +846,7 @@ def render():
 
     code, company_name, market = resolved
 
-    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 이동평균선을 계산하는 중입니다..."):
+    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 지지·저항선을 계산하는 중입니다..."):
         df_ohlcv_full = _fetch_stock_ohlcv(code, market)
 
     if df_ohlcv_full.empty:
