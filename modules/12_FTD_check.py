@@ -142,7 +142,7 @@ def _resolve_company(query: str, listing_df: pd.DataFrame) -> tuple[str, str, st
 def _fetch_stock_ohlcv(code: str, market: str) -> pd.DataFrame:
     """
     한국 상장종목 일봉 OHLCV 데이터 조회.
-    200일 SMA 및 주봉 50주 SMA 계산에 충분한 과거 데이터를 포함해 조회합니다.
+    200일 SMA 및 주봉 30주 MA 계산에 충분한 과거 데이터를 포함해 조회합니다.
     """
     df = pd.DataFrame()
     fetch_period = "5y"
@@ -199,19 +199,18 @@ def _trim_2y_period(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[df.index >= (last_dt - pd.DateOffset(years=2))].copy()
 
 
-def _detect_trading_zones(
+def _detect_zone_bands(
     df: pd.DataFrame,
     window: int = 8,
-    band_width_pct: float = 0.035,
-    max_zones: int = 3,
-) -> list[dict]:
+    band_pct: float = 0.032,
+) -> tuple[dict | None, dict | None]:
     """
-    OHLCV 데이터에서 주요 스윙 고점·저점 및 종가 밀집도를 바탕으로
-    핵심 트레이딩 구간(low_price ~ high_price)을 추출합니다.
-    반환: [{'low': float, 'high': float, 'mid': float, 'score': float, 'role': str}, ...]
+    첨부 이미지의 '저항 지역' 및 '지지 지역' 개념을 반영해
+    현재 종가 기준 상단 핵심 저항 지역(resistance_zone)과 하단 핵심 지지 지역(support_zone)을 산출합니다.
+    반환: (resistance_zone, support_zone), 각 dict는 {'low', 'high', 'mid', 'label'} 포함
     """
     if df.empty or len(df) < window * 2 + 1:
-        return []
+        return None, None
 
     highs = df["High"].to_numpy(dtype=float)
     lows = df["Low"].to_numpy(dtype=float)
@@ -219,147 +218,206 @@ def _detect_trading_zones(
     last_close = float(closes[-1])
     n = len(df)
 
-    anchor_points: list[tuple[float, int]] = []
+    swing_highs: list[tuple[float, int]] = []
+    swing_lows: list[tuple[float, int]] = []
     for i in range(window, n - window):
         if highs[i] >= highs[i - window : i + window + 1].max():
-            anchor_points.append((float(highs[i]), i))
+            swing_highs.append((float(highs[i]), i))
         if lows[i] <= lows[i - window : i + window + 1].min():
-            anchor_points.append((float(lows[i]), i))
+            swing_lows.append((float(lows[i]), i))
 
-    # 최근 구간 극값 보완
-    recent_slice = df.iloc[max(0, n - max(window * 3, 20)) :]
-    anchor_points.append((float(recent_slice["High"].max()), n - 1))
-    anchor_points.append((float(recent_slice["Low"].min()), n - 1))
+    swing_highs.append((float(df["High"].max()), n - 1))
+    swing_lows.append((float(df["Low"].min()), n - 1))
 
-    anchor_points.sort(key=lambda x: x[0])
-    clusters: list[dict] = []
-    for price, idx in anchor_points:
-        if price <= 0:
-            continue
-        if not clusters:
-            clusters.append({"prices": [price], "last_idx": idx, "count": 1})
-        else:
-            avg_p = float(np.mean(clusters[-1]["prices"]))
-            if abs(price - avg_p) / avg_p <= band_width_pct * 0.85:
-                clusters[-1]["prices"].append(price)
-                clusters[-1]["last_idx"] = max(clusters[-1]["last_idx"], idx)
-                clusters[-1]["count"] += 1
+    def _build_best_zone(candidates: list[tuple[float, int]], kind: str) -> dict | None:
+        if not candidates:
+            return None
+        scored: list[dict] = []
+        for anchor_p, anchor_idx in candidates:
+            if anchor_p <= 0:
+                continue
+            z_low = anchor_p * (1.0 - band_pct * 0.5)
+            z_high = anchor_p * (1.0 + band_pct * 0.5)
+            touches = sum(
+                1 for p, _ in candidates if z_low <= p <= z_high
+            )
+            in_closes = int(np.sum((closes >= z_low) & (closes <= z_high)))
+            recency = anchor_idx / max(n, 1)
+
+            if kind == "resistance":
+                # 현재가 위쪽 저항 지역 우선, 없으면 상단 박스권
+                dist_penalty = abs(anchor_p - last_close) / max(last_close, 1.0)
+                above_bonus = 3.0 if anchor_p >= last_close * 0.995 else 0.0
             else:
-                clusters.append({"prices": [price], "last_idx": idx, "count": 1})
+                # 현재가 아래쪽 지지 지역 우선, 없으면 하단 박스권
+                dist_penalty = abs(last_close - anchor_p) / max(last_close, 1.0)
+                above_bonus = 3.0 if anchor_p <= last_close * 1.005 else 0.0
 
-    zones: list[dict] = []
-    for c in clusters:
-        mid = float(np.mean(c["prices"]))
-        half_span = mid * (band_width_pct * 0.5)
-        raw_low = min(c["prices"])
-        raw_high = max(c["prices"])
-        z_low = min(raw_low, mid - half_span)
-        z_high = max(raw_high, mid + half_span)
+            score = touches * 2.5 + in_closes * 0.3 + recency * 2.0 + above_bonus - dist_penalty * 4.0
+            scored.append({
+                "low": float(z_low),
+                "high": float(z_high),
+                "mid": float((z_low + z_high) * 0.5),
+                "score": float(score),
+            })
 
-        # 구간 내 실제 종가 체류 횟수로 거래 밀집도 가중치 부여
-        in_zone_closes = int(np.sum((closes >= z_low) & (closes <= z_high)))
-        recency = c["last_idx"] / max(n, 1)
-        score = c["count"] * 2.5 + in_zone_closes * 0.35 + recency * 2.0
+        if not scored:
+            return None
 
-        if z_low > last_close * 1.005:
-            role = "상단 트레이딩 구간"
-        elif z_high < last_close * 0.995:
-            role = "하단 트레이딩 구간"
-        else:
-            role = "현재 트레이딩 구간"
+        best = max(scored, key=lambda x: x["score"])
+        # 같은 방향의 인접 후보를 병합해 박스 영역 폭을 자연스럽게 확장
+        for s in scored:
+            if s["low"] <= best["high"] * 1.015 and s["high"] >= best["low"] * 0.985:
+                best["low"] = min(best["low"], s["low"])
+                best["high"] = max(best["high"], s["high"])
+        best["mid"] = (best["low"] + best["high"]) * 0.5
+        best["label"] = "저항 지역" if kind == "resistance" else "지지 지역"
+        return best
 
-        zones.append({
-            "low": float(z_low),
-            "high": float(z_high),
-            "mid": float(mid),
-            "score": float(score),
-            "role": role,
-        })
+    res_zone = _build_best_zone(swing_highs, "resistance")
+    sup_zone = _build_best_zone(swing_lows, "support")
 
-    # 겹치는 구간 병합
-    zones.sort(key=lambda z: z["mid"])
-    merged: list[dict] = []
-    for z in zones:
-        if not merged:
-            merged.append(z)
-        else:
-            prev = merged[-1]
-            if z["low"] <= prev["high"] * 1.012:
-                prev["low"] = min(prev["low"], z["low"])
-                prev["high"] = max(prev["high"], z["high"])
-                prev["mid"] = (prev["low"] + prev["high"]) * 0.5
-                prev["score"] = max(prev["score"], z["score"]) + 1.0
-                if prev["low"] <= last_close <= prev["high"]:
-                    prev["role"] = "현재 트레이딩 구간"
-                elif prev["low"] > last_close:
-                    prev["role"] = "상단 트레이딩 구간"
-                else:
-                    prev["role"] = "하단 트레이딩 구간"
-            else:
-                merged.append(z)
+    # 저항 지역과 지지 지역이 겹치지 않도록 분리
+    if res_zone and sup_zone and res_zone["low"] <= sup_zone["high"]:
+        mid_split = (res_zone["mid"] + sup_zone["mid"]) * 0.5
+        if res_zone["mid"] >= sup_zone["mid"]:
+            res_zone["low"] = max(res_zone["low"], mid_split * 1.005)
+            sup_zone["high"] = min(sup_zone["high"], mid_split * 0.995)
+            if res_zone["high"] < res_zone["low"]:
+                res_zone["high"] = res_zone["low"] * (1.0 + band_pct * 0.5)
+            if sup_zone["low"] > sup_zone["high"]:
+                sup_zone["low"] = sup_zone["high"] * (1.0 - band_pct * 0.5)
 
-    top_zones = sorted(merged, key=lambda z: -z["score"])[:max_zones]
-    top_zones.sort(key=lambda z: -z["mid"])
-    return top_zones
+    return res_zone, sup_zone
 
 
-def _add_trading_zones_to_fig(
+def _add_zone_bands_to_fig(
     fig: go.Figure,
     df: pd.DataFrame,
-    zones: list[dict],
+    res_zone: dict | None,
+    sup_zone: dict | None,
 ) -> None:
-    """차트 주가 영역(row=1)에 트레이딩 구간 밴드와 오른쪽 가격 범위를 표기"""
-    if df.empty or not zones:
+    """일봉/주봉 차트에 '저항 지역'과 '지지 지역' 밴드 및 우측 가격 범위를 표기"""
+    if df.empty:
         return
 
     y_min = float(df["Low"].min())
     y_max = float(df["High"].max())
     y_span = max(y_max - y_min, 1.0)
-    min_gap = y_span * 0.045
+    min_gap = y_span * 0.055
 
-    palette = [
-        ("rgba(56, 189, 248, 0.12)", "#38bdf8", "rgba(12, 74, 110, 0.90)"),
-        ("rgba(251, 146, 60, 0.12)", "#fb923c", "rgba(124, 45, 18, 0.90)"),
-        ("rgba(167, 139, 250, 0.12)", "#a78bfa", "rgba(76, 29, 149, 0.90)"),
-    ]
-
-    label_items: list[tuple[float, str, str, str]] = []
-    for idx, z in enumerate(zones, start=1):
-        fill_rgba, border_hex, badge_bg = palette[(idx - 1) % len(palette)]
+    items: list[tuple[float, str, str, str, str]] = []
+    if res_zone:
         fig.add_hrect(
-            y0=z["low"],
-            y1=z["high"],
-            fillcolor=fill_rgba,
-            line=dict(color=border_hex, width=1.0, dash="dot"),
+            y0=res_zone["low"],
+            y1=res_zone["high"],
+            fillcolor="rgba(244, 63, 94, 0.14)",
+            line=dict(color="#fb7185", width=1.2, dash="dash"),
             row=1,
             col=1,
         )
-        text = f"구간{idx}: {z['low']:,.0f} ~ {z['high']:,.0f}원"
-        label_items.append((z["mid"], text, border_hex, badge_bg))
+        fig.add_hline(
+            y=res_zone["high"],
+            line_dash="dot",
+            line_width=1.0,
+            line_color="#fb7185",
+            opacity=0.75,
+            row=1,
+            col=1,
+        )
+        fig.add_hline(
+            y=res_zone["low"],
+            line_dash="dot",
+            line_width=1.0,
+            line_color="#fb7185",
+            opacity=0.75,
+            row=1,
+            col=1,
+        )
+        items.append((
+            res_zone["mid"],
+            f"저항 지역 ({res_zone['low']:,.0f} ~ {res_zone['high']:,.0f}원)",
+            "저항 지역",
+            "#fb7185",
+            "rgba(136, 19, 55, 0.92)",
+        ))
 
-    label_items.sort(key=lambda x: x[0])
+    if sup_zone:
+        fig.add_hrect(
+            y0=sup_zone["low"],
+            y1=sup_zone["high"],
+            fillcolor="rgba(56, 189, 248, 0.14)",
+            line=dict(color="#38bdf8", width=1.2, dash="dash"),
+            row=1,
+            col=1,
+        )
+        fig.add_hline(
+            y=sup_zone["high"],
+            line_dash="dot",
+            line_width=1.0,
+            line_color="#38bdf8",
+            opacity=0.75,
+            row=1,
+            col=1,
+        )
+        fig.add_hline(
+            y=sup_zone["low"],
+            line_dash="dot",
+            line_width=1.0,
+            line_color="#38bdf8",
+            opacity=0.75,
+            row=1,
+            col=1,
+        )
+        items.append((
+            sup_zone["mid"],
+            f"지지 지역 ({sup_zone['low']:,.0f} ~ {sup_zone['high']:,.0f}원)",
+            "지지 지역",
+            "#38bdf8",
+            "rgba(12, 74, 110, 0.92)",
+        ))
+
+    if not items:
+        return
+
+    items.sort(key=lambda x: x[0])
     adjusted_y: list[float] = []
-    for mid_p, _, _, _ in label_items:
+    for mid_p, _, _, _, _ in items:
         y_pos = mid_p
         if adjusted_y and (y_pos - adjusted_y[-1]) < min_gap:
             y_pos = adjusted_y[-1] + min_gap
         adjusted_y.append(y_pos)
 
-    for (_, label_text, border_hex, badge_bg), y_pos in zip(label_items, adjusted_y):
+    for (_, right_text, badge_short, border_hex, bg_rgba), y_pos in zip(items, adjusted_y):
         fig.add_annotation(
             x=1.004,
             xref="paper",
             y=y_pos,
             yref="y",
-            text=f"<b>{label_text}</b>",
+            text=f"<b>{right_text}</b>",
             showarrow=False,
             xanchor="left",
             yanchor="middle",
             font=dict(color="#f8fafc", size=10.5),
-            bgcolor=badge_bg,
+            bgcolor=bg_rgba,
             bordercolor=border_hex,
             borderwidth=1,
             borderpad=3,
+        )
+        fig.add_annotation(
+            x=0.01,
+            xref="x domain",
+            y=y_pos,
+            yref="y",
+            text=f"<b>{badge_short}</b>",
+            showarrow=False,
+            xanchor="left",
+            yanchor="middle",
+            font=dict(color="#f8fafc", size=10.5),
+            bgcolor=bg_rgba,
+            bordercolor=border_hex,
+            borderwidth=1,
+            borderpad=2,
         )
 
 
@@ -520,7 +578,7 @@ def _detect_ftd_signals(
 
 
 def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉(최근 2년) + 이평선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 우측 트레이딩 구간"""
+    """일봉(최근 2년) + 이평선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 지지/저항 지역"""
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -680,13 +738,12 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
         col=1,
     )
 
-    # 트레이딩 구간 계산 및 차트 오른쪽 가격 범위 표기
-    zones = _detect_trading_zones(df, window=8, band_width_pct=0.035, max_zones=3)
-    _add_trading_zones_to_fig(fig, df, zones)
+    res_zone, sup_zone = _detect_zone_bands(df, window=8, band_pct=0.030)
+    _add_zone_bands_to_fig(fig, df, res_zone, sup_zone)
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 트레이딩 구간(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 일봉 FTD 및 지지·저항 지역(최근 2년 · 20 EMA / 50 SMA / 200 SMA)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
@@ -695,7 +752,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
         plot_bgcolor="#0f172a",
         height=650,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=45, r=195, t=55, b=30),
+        margin=dict(l=45, r=230, t=55, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -713,7 +770,7 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
 
 
 def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉 데이터를 주봉(W-FRI)으로 변환 후 최근 2년 주봉 차트 + 오른쪽 트레이딩 구간 표기"""
+    """일봉 데이터를 주봉(W-FRI)으로 변환 후 최근 2년 주봉 차트 + 30주선 + 지지/저항 지역 표기"""
     weekly = pd.DataFrame({
         "Open": df_daily["Open"].resample("W-FRI").first(),
         "High": df_daily["High"].resample("W-FRI").max(),
@@ -722,8 +779,8 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
         "Volume": df_daily["Volume"].resample("W-FRI").sum(),
     }).dropna(subset=["Open", "High", "Low", "Close"])
 
-    weekly["EMA_20W"] = weekly["Close"].ewm(span=20, adjust=False).mean()
-    weekly["SMA_50W"] = weekly["Close"].rolling(50, min_periods=10).mean()
+    # 와인스타인 30주 이동평균선(30주 SMA)
+    weekly["MA_30W"] = weekly["Close"].rolling(30, min_periods=5).mean()
 
     if not weekly.empty:
         cutoff_2y = weekly.index.max() - pd.DateOffset(years=2)
@@ -755,24 +812,11 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
     fig.add_trace(
         go.Scatter(
             x=weekly.index,
-            y=weekly["EMA_20W"],
+            y=weekly["MA_30W"],
             mode="lines",
-            name="20주 EMA",
-            line=dict(color="#22c55e", width=1.8),
-            hovertemplate="주봉 날짜: %{x|%Y-%m-%d}<br>20주 EMA: %{y:,.0f}원<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=weekly.index,
-            y=weekly["SMA_50W"],
-            mode="lines",
-            name="50주 SMA",
-            line=dict(color="#f59e0b", width=2.0),
-            hovertemplate="주봉 날짜: %{x|%Y-%m-%d}<br>50주 SMA: %{y:,.0f}원<extra></extra>",
+            name="30주선 (30주 MA)",
+            line=dict(color="#facc15", width=2.2),
+            hovertemplate="주봉 날짜: %{x|%Y-%m-%d}<br>30주선 (30주 MA): %{y:,.0f}원<extra></extra>",
         ),
         row=1,
         col=1,
@@ -794,13 +838,12 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
         col=1,
     )
 
-    # 주봉 기준 트레이딩 구간 계산 및 차트 오른쪽 가격 범위 표기
-    zones_w = _detect_trading_zones(weekly, window=4, band_width_pct=0.045, max_zones=3)
-    _add_trading_zones_to_fig(fig, weekly, zones_w)
+    res_zone_w, sup_zone_w = _detect_zone_bands(weekly, window=4, band_pct=0.042)
+    _add_zone_bands_to_fig(fig, weekly, res_zone_w, sup_zone_w)
 
     fig.update_layout(
         title=dict(
-            text=f"<b>{company_name} ({code}) - 주봉 차트 및 트레이딩 구간 (최근 2년 · 20주 EMA / 50주 SMA)</b>",
+            text=f"<b>{company_name} ({code}) - 주봉 차트 (최근 2년 · 30주선 · 지지/저항 지역)</b>",
             font=dict(size=18, color="#f8fafc"),
             x=0.02,
         ),
@@ -809,7 +852,7 @@ def _build_weekly_chart(df_daily: pd.DataFrame, company_name: str, code: str) ->
         plot_bgcolor="#0f172a",
         height=570,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=45, r=195, t=55, b=30),
+        margin=dict(l=45, r=230, t=55, b=30),
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -832,7 +875,7 @@ def render():
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
     st.caption(
-        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA | FTD(★) · FTD 깨짐(✕) · 우측 트레이딩 구간 | 조회 시각: {run_timestamp}"
+        f"일봉·주봉 최근 2년 기준 | 일봉(20 EMA · 50 SMA · 200 SMA) · 주봉(30주선) | FTD(★) · FTD 깨짐(✕) · 지지/저항 지역 | 조회 시각: {run_timestamp}"
     )
 
     listing_df = _load_krx_listing()
@@ -875,7 +918,7 @@ def render():
 
     code, company_name, market = resolved
 
-    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 트레이딩 구간을 계산하는 중입니다..."):
+    with st.spinner(f"{company_name} ({code}) 일봉 데이터를 불러와 FTD 신호 및 지지·저항 지역을 계산하는 중입니다..."):
         df_ohlcv_full = _fetch_stock_ohlcv(code, market)
 
     if df_ohlcv_full.empty:
@@ -962,7 +1005,7 @@ def render():
         st.dataframe(pd.DataFrame(history_rows), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.markdown("### 📈 주봉 차트 (최근 2년)")
+    st.markdown("### 📈 주봉 차트 (최근 2년 · 30주선)")
     st.plotly_chart(
         _build_weekly_chart(df_ftd_full, company_name, code),
         use_container_width=True,
