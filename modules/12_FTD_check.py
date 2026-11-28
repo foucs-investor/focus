@@ -210,7 +210,13 @@ def _detect_ftd_signals(
 ) -> pd.DataFrame:
     """
     일봉 OHLCV 기준 이동평균선(20일 EMA, 50일 SMA, 200일 SMA) 및
-    Rally Attempt Day 1 / Follow-Through Day(FTD) 탐지
+    Rally Attempt Day 1 / Follow-Through Day(FTD) / FTD 깨짐(실패) 탐지
+
+    [FTD 깨짐(실패) 기준]
+    FTD 발생 이후 활성 FTD 추세가 유지되는 동안 다음 중 하나가 발생하면 FTD 깨짐으로 판정:
+    1) 종가가 FTD 당일 저가(FTD_Low) 미만으로 마감
+    2) 종가가 해당 랠리 구간의 최저가(Rally_Low) 미만으로 마감
+    3) FTD 발생 직후 5거래일 이내에 분배일(전일 대비 거래량 증가 + 등락률 <= -0.2%)이 3회 누적
     """
     out = df.copy()
     out["Prev_Close"] = out["Close"].shift(1)
@@ -234,11 +240,21 @@ def _detect_ftd_signals(
     out["Rally_Day_Count"] = np.nan
     out["Is_FTD"] = False
     out["FTD_Reason"] = ""
+    out["Is_FTD_Failed"] = False
+    out["FTD_Fail_Reason"] = ""
+    out["FTD_Status"] = ""
+    out["FTD_Broken_Date"] = ""
 
     in_rally = False
     rally_start_idx: int | None = None
     rally_low: float | None = None
     ftd_triggered_in_cycle = False
+
+    # 활성 FTD 추적용 상태 변수
+    active_ftd_idx: int | None = None
+    active_ftd_low: float | None = None
+    active_ftd_rally_low: float | None = None
+    dist_days_after_ftd = 0
 
     n = len(out)
     for i in range(1, n):
@@ -253,9 +269,44 @@ def _detect_ftd_signals(
         vol_ma20 = float(row["Vol_MA20"]) if pd.notna(row["Vol_MA20"]) else 0.0
         dd_high20 = float(row["Drawdown_From_High20"]) if pd.notna(row["Drawdown_From_High20"]) else 0.0
 
+        # 1. 현재 활성화된 FTD가 깨졌는지 먼저 점검
+        if active_ftd_idx is not None:
+            days_from_ftd = i - active_ftd_idx
+            if days_from_ftd <= 5 and pct <= -0.2 and prev_vol > 0 and vol_val > prev_vol:
+                dist_days_after_ftd += 1
+
+            fail_reason = ""
+            if active_ftd_rally_low is not None and close_val < active_ftd_rally_low:
+                fail_reason = f"랠리 저점({active_ftd_rally_low:,.0f}원) 종가 이탈"
+            elif active_ftd_low is not None and close_val < active_ftd_low:
+                fail_reason = f"FTD 당일 저가({active_ftd_low:,.0f}원) 종가 이탈"
+            elif days_from_ftd <= 5 and dist_days_after_ftd >= 3:
+                fail_reason = "FTD 직후 5거래일 내 분배일 3회 누적"
+
+            if fail_reason:
+                ftd_date_str = out.index[active_ftd_idx].strftime("%Y-%m-%d")
+                broken_date_str = out.index[i].strftime("%Y-%m-%d")
+                out.iloc[i, out.columns.get_loc("Is_FTD_Failed")] = True
+                out.iloc[i, out.columns.get_loc("FTD_Fail_Reason")] = (
+                    f"{ftd_date_str} FTD 깨짐 ({fail_reason})"
+                )
+                out.iloc[active_ftd_idx, out.columns.get_loc("FTD_Status")] = f"❌ 깨짐 ({broken_date_str})"
+                out.iloc[active_ftd_idx, out.columns.get_loc("FTD_Broken_Date")] = broken_date_str
+
+                # 활성 FTD 종료 및 새 랠리 탐색 가능 상태로 전환
+                active_ftd_idx = None
+                active_ftd_low = None
+                active_ftd_rally_low = None
+                dist_days_after_ftd = 0
+                in_rally = False
+                rally_start_idx = None
+                rally_low = None
+                ftd_triggered_in_cycle = False
+
+        # 2. 기존 랠리 사이클 진행 중 무효화 또는 만료 체크
         if in_rally and rally_start_idx is not None:
             elapsed = i - rally_start_idx + 1
-            if rally_low is not None and low_val < rally_low * 0.94:
+            if rally_low is not None and low_val < rally_low * 0.94 and not ftd_triggered_in_cycle:
                 in_rally = False
                 rally_start_idx = None
                 rally_low = None
@@ -266,6 +317,7 @@ def _detect_ftd_signals(
                 rally_low = None
                 ftd_triggered_in_cycle = False
 
+        # 3. 새로운 랠리 시도 1일차 탐색
         if not in_rally:
             is_pullback_zone = dd_high20 <= pullback_pct
             is_rebound_day = (close_val > prev_close) or (close_val >= float(row["Open"]) and pct >= 0.0)
@@ -277,6 +329,7 @@ def _detect_ftd_signals(
                 out.iloc[i, out.columns.get_loc("Is_Rally_Day1")] = True
                 out.iloc[i, out.columns.get_loc("Rally_Day_Count")] = 1
 
+        # 4. 진행 중인 랠리 일차 카운트 및 FTD 판별
         if in_rally and rally_start_idx is not None:
             day_num = i - rally_start_idx + 1
             if rally_low is not None:
@@ -300,12 +353,18 @@ def _detect_ftd_signals(
                 out.iloc[i, out.columns.get_loc("FTD_Reason")] = (
                     f"랠리 {day_num}일차 | 등락률 {pct:+.2f}% | 거래량/전일 {vol_ratio_str}"
                 )
+                out.iloc[i, out.columns.get_loc("FTD_Status")] = "✅ 유효 유지"
+
+                active_ftd_idx = i
+                active_ftd_low = low_val
+                active_ftd_rally_low = rally_low
+                dist_days_after_ftd = 0
 
     return out
 
 
 def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figure:
-    """일봉(최근 2년) + 이동평균선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD 마커 + 거래량 차트 생성"""
+    """일봉(최근 2년) + 이동평균선(20 EMA, 50 SMA, 200 SMA) + Day1/FTD/FTD깨짐(X) + 거래량 차트"""
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -402,12 +461,48 @@ def _build_ftd_chart(df: pd.DataFrame, company_name: str, code: str) -> go.Figur
                     "<b>FTD 발생</b><br>"
                     "날짜: %{x|%Y-%m-%d}<br>"
                     "종가: %{customdata[0]:,.0f}원 (%{customdata[1]:+.2f}%)<br>"
-                    "%{customdata[2]}<extra></extra>"
+                    "%{customdata[2]}<br>"
+                    "상태: %{customdata[3]}<extra></extra>"
                 ),
                 customdata=np.column_stack([
                     ftd_df["Close"].values,
                     ftd_df["Pct_Change"].fillna(0.0).values,
                     ftd_df["FTD_Reason"].fillna("").values,
+                    ftd_df["FTD_Status"].fillna("").values,
+                ]),
+            ),
+            row=1,
+            col=1,
+        )
+
+    # FTD 깨짐(무효화) X 표기
+    failed_df = df[df["Is_FTD_Failed"]]
+    if not failed_df.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=failed_df.index,
+                y=failed_df["High"] * 1.025,
+                mode="markers+text",
+                name="FTD 깨짐 (실패)",
+                text=["FTD 깨짐"] * len(failed_df),
+                textposition="top center",
+                textfont=dict(color="#f87171", size=11),
+                marker=dict(
+                    symbol="x",
+                    size=14,
+                    color="#ef4444",
+                    line=dict(width=2.5, color="#ffffff"),
+                ),
+                hovertemplate=(
+                    "<b>❌ FTD 깨짐 (무효화)</b><br>"
+                    "날짜: %{x|%Y-%m-%d}<br>"
+                    "종가: %{customdata[0]:,.0f}원 (%{customdata[1]:+.2f}%)<br>"
+                    "사유: %{customdata[2]}<extra></extra>"
+                ),
+                customdata=np.column_stack([
+                    failed_df["Close"].values,
+                    failed_df["Pct_Change"].fillna(0.0).values,
+                    failed_df["FTD_Fail_Reason"].fillna("").values,
                 ]),
             ),
             row=1,
@@ -574,7 +669,7 @@ def render():
 
     st.markdown("## 🎯 한국 상장기업 Follow-Through Day (FTD) 체크")
     st.caption(
-        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA 적용 | 마우스 드래그 이동 & 스크롤 확대·축소 | 조회 시각: {run_timestamp}"
+        f"일봉·주봉 최근 2년 기준 | 20일 EMA · 50일 SMA · 200일 SMA | FTD(★) 및 FTD 깨짐(✕) 표기 | 조회 시각: {run_timestamp}"
     )
 
     listing_df = _load_krx_listing()
@@ -639,20 +734,15 @@ def render():
     latest_close = float(latest["Close"])
     latest_pct = float(latest["Pct_Change"]) if pd.notna(latest["Pct_Change"]) else 0.0
     ftd_events = df_ftd[df_ftd["Is_FTD"]].copy()
+    failed_events = df_ftd[df_ftd["Is_FTD_Failed"]].copy()
     last_ftd_str = ftd_events.index[-1].strftime("%Y-%m-%d") if not ftd_events.empty else "없음"
-    days_since_ftd = (
-        int((df_ftd.index[-1] - ftd_events.index[-1]).days) if not ftd_events.empty else None
-    )
+    last_ftd_status = str(ftd_events["FTD_Status"].iloc[-1]) if not ftd_events.empty else "신호 미발생"
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("종목", f"{company_name} ({code})", market)
     m2.metric("최근 종가", f"{latest_close:,.0f}원", f"{latest_pct:+.2f}%")
-    m3.metric("최근 2년 FTD 발생 횟수", f"{len(ftd_events)}회")
-    m4.metric(
-        "최근 FTD 발생일",
-        last_ftd_str,
-        f"{days_since_ftd}일 경과" if days_since_ftd is not None else "신호 미발생",
-    )
+    m3.metric("최근 2년 FTD 발생 / 깨짐", f"{len(ftd_events)}회 / {len(failed_events)}회")
+    m4.metric("최근 FTD 발생일", last_ftd_str, last_ftd_status)
 
     ema20_val = float(latest["EMA_20"]) if pd.notna(latest["EMA_20"]) else np.nan
     sma50_val = float(latest["SMA_50"]) if pd.notna(latest["SMA_50"]) else np.nan
@@ -662,7 +752,9 @@ def render():
     ma_c2.metric("50일 SMA", f"{sma50_val:,.0f}원" if pd.notna(sma50_val) else "-")
     ma_c3.metric("200일 SMA", f"{sma200_val:,.0f}원" if pd.notna(sma200_val) else "-")
 
-    if bool(latest["Is_FTD"]):
+    if bool(latest["Is_FTD_Failed"]):
+        st.error(f"❌ **오늘({df_ftd.index[-1].strftime('%Y-%m-%d')}) FTD가 깨졌습니다!** — {latest['FTD_Fail_Reason']}")
+    elif bool(latest["Is_FTD"]):
         st.success(f"🚀 **오늘({df_ftd.index[-1].strftime('%Y-%m-%d')}) FTD 신호가 발생했습니다!** — {latest['FTD_Reason']}")
     elif pd.notna(latest["Rally_Day_Count"]):
         st.info(
@@ -694,6 +786,7 @@ def render():
             )
             history_rows.append({
                 "FTD 날짜": dt_idx.strftime("%Y-%m-%d"),
+                "FTD 상태": r["FTD_Status"] if r["FTD_Status"] else "✅ 유효 유지",
                 "랠리 일차": f"{int(r['Rally_Day_Count'])}일차" if pd.notna(r["Rally_Day_Count"]) else "-",
                 "종가(원)": f"{float(r['Close']):,.0f}",
                 "당일 등락률": f"{float(r['Pct_Change']):+.2f}%" if pd.notna(r["Pct_Change"]) else "-",
